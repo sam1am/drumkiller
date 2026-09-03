@@ -331,3 +331,8 @@ body.dragover::after { content: 'DROP SONG ZIP TO IMPORT'; position: fixed; inse
 .editor-footer { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .editor-footer .spacer { flex: 1; }
 .editor-help kbd { margin: 0 2px; }
+/* ───────────── offset picker ───────────── */
+.offset-picker { outline: none; border-radius: 12px; }
+.offset-picker:focus-visible { box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 60%, transparent); }
+.offset-overview { display: block; width: 100%; height: 56px; border-radius: 10px 10px 0 0; border: 1px solid var(--line); cursor: crosshair; touch-action: none; }
+.offset-zoom { display: block; width: 100%; height: 150px; border-radius: 0 0 10px 10px; border: 1px solid var(--line); border-top: none; cursor: ew-resize; touch-action: none; }

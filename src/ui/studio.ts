@@ -8,6 +8,7 @@ import { topbar } from './topbar';
 import { studioState } from './studioState';
 import { VOICE_COLORS } from '@/game/renderer';
 import { applySongKit } from './game';
+import { offsetPicker, type OffsetPicker } from './offsetPicker';
 
 /** Copy into a plain ArrayBuffer so Blob typing is happy. */
 function midiBytes(u8: Uint8Array): ArrayBuffer {
@@ -37,6 +38,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
   let player: ChartPlayer | null = null;
   let metro: Metronome | null = null;
   let quant: QuantizeOptions = { grid: '1/16', strength: 1, swing: 0, dedupeWindow: 0.03 };
+  let picker: OffsetPicker | null = null;
   let quantized: Chart | null = null;
 
   studioState.chartForRecording = (pkg) => baseChart(pkg);
@@ -46,6 +48,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
   }
 
   function stopPreview(): void {
+    picker?.stop();
     player?.stop();
     metro?.stop();
     transport?.stop();
@@ -130,8 +133,10 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     const pkg = studioState.pkg!;
     const meta = pkg.meta;
     const buf = studioState.audioBuffer!;
-    const bpmInput = h('input', { class: 'input', type: 'number', step: 0.01, min: 20, max: 300, value: meta.bpm, onChange: (e: Event) => { meta.bpm = Number((e.target as HTMLInputElement).value) || 120; } });
-    const offsetInput = h('input', { class: 'input', type: 'number', step: 0.001, value: meta.offset, onChange: (e: Event) => { meta.offset = Number((e.target as HTMLInputElement).value) || 0; } });
+    const bpmInput = h('input', { class: 'input', type: 'number', step: 0.01, min: 20, max: 300, value: meta.bpm, onChange: (e: Event) => { meta.bpm = Number((e.target as HTMLInputElement).value) || 120; picker?.setBpm(meta.bpm); } });
+    const offsetInput = h('input', { class: 'input', type: 'number', step: 0.001, value: meta.offset, onChange: (e: Event) => { meta.offset = Number((e.target as HTMLInputElement).value) || 0; picker?.setOffset(meta.offset); } });
+    picker?.dispose();
+    picker = offsetPicker(app, buf, meta.offset, meta.bpm, (v) => { meta.offset = v; offsetInput.value = String(v); });
     // tap tempo
     const taps: number[] = [];
     const tapBtn = button('TAP TEMPO', () => {
@@ -144,6 +149,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         const mean = iv.slice(-8).reduce((a, b) => a + b, 0) / Math.min(8, iv.length);
         meta.bpm = Math.round((60000 / mean) * 10) / 10;
         bpmInput.value = String(meta.bpm);
+        picker?.setBpm(meta.bpm);
         tapBtn.textContent = `TAP TEMPO (${meta.bpm})`;
       } else tapBtn.textContent = `TAP TEMPO (${taps.length}/4)`;
     });
@@ -176,6 +182,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         const t = transport!.positionAtPerfTime(hit.timeStamp) - app.engine.inputLatencyCompensation + app.settings.inputOffset;
         meta.offset = Math.round(t * 1000) / 1000;
         offsetInput.value = String(meta.offset);
+        picker?.setOffset(meta.offset);
         unsub();
         stopPreview();
         toast(`Offset set to ${meta.offset.toFixed(3)}s`, 'ok');
@@ -195,8 +202,9 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
           h('div', { class: 'row' }, h('div', { class: 'field', style: { flex: '0 0 140px', marginBottom: 0 } }, h('label', null, 'BPM'), bpmInput), tapBtn, playBtn),
           h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'Tap along to the song, or type the BPM. Then press PLAY WITH CLICK to check the click lines up.'),
           h('h3', null, 'Offset'),
-          h('div', { class: 'row' }, h('div', { class: 'field', style: { flex: '0 0 140px', marginBottom: 0 } }, h('label', null, 'Seconds before beat 1'), offsetInput), tapOffset),
-          h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'Chart time 0 = beat 1 of bar 1. If the song has a pickup or silence, the offset is how many seconds into the audio that downbeat lands.'),
+          h('div', { class: 'small mute', style: { marginBottom: '8px' } }, 'Chart time 0 = beat 1 of bar 1. Place the mark where that downbeat lands in the audio, then fine-tune it on the zoomed view and play around it to check.'),
+          picker.el,
+          h('div', { class: 'row', style: { marginTop: '10px' } }, h('div', { class: 'field', style: { flex: '0 0 140px', marginBottom: 0 } }, h('label', null, 'Seconds before beat 1'), offsetInput), tapOffset),
           h('h3', null, 'Recording'),
           h('div', { class: 'row' },
             h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: studioState.metronome, onChange: (e: Event) => { studioState.metronome = (e.target as HTMLInputElement).checked; } }), 'Metronome while recording'),
@@ -443,5 +451,5 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
 
   const el = h('div', { class: 'screen' }, topbar(app, 'STUDIO', button('BACK', () => app.navigate('title'), 'ghost')), h('div', { class: 'screen-body' }, h('div', { style: { maxWidth: '1200px', margin: '0 auto' } }, stepsEl, body)));
   render();
-  return { el, dispose: stopPreview };
+  return { el, dispose: () => { stopPreview(); picker?.dispose(); } };
 }
