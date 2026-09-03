@@ -61,6 +61,7 @@ export class GameSession {
   private paused = false;
   private resizeHandler = () => this.renderer.resize();
   private latencyComp = 0;
+  private analyser: AnalyserNode | null = null;
 
   constructor(
     private engine: AudioEngine,
@@ -82,6 +83,17 @@ export class GameSession {
     this.renderer = new HighwayRenderer(canvas);
     this.renderer.setReducedMotion(cfg.reducedMotion);
     this.renderer.setLaneOrder(cfg.laneOrder);
+    // Background visualiser: tap the master bus (song + drums) with an analyser. Never fatal if unavailable.
+    try {
+      const an = engine.ctx.createAnalyser();
+      an.fftSize = 1024;
+      an.smoothingTimeConstant = 0.6;
+      engine.master.connect(an);
+      this.analyser = an;
+      this.renderer.setAnalyser(an);
+    } catch {
+      this.analyser = null;
+    }
     this.beats = computeBeats(cfg.chart, this.audioDuration - cfg.meta.offset);
     this.judge.onEvent((ev) => this.handleJudge(ev));
     if (cfg.mode === 'practice' && cfg.guideDrums) {
@@ -199,6 +211,15 @@ export class GameSession {
     this.metro?.stop();
     this.unsubInput?.();
     window.removeEventListener('resize', this.resizeHandler);
+    if (this.analyser) {
+      try {
+        this.engine.master.disconnect(this.analyser);
+      } catch {
+        /* already gone */
+      }
+      this.renderer.setAnalyser(null);
+      this.analyser = null;
+    }
   }
 
   private handleHit(hit: InputHit): void {
@@ -206,6 +227,7 @@ export class GameSession {
     if (this.cfg.drumSoundsOnHit) this.kit.trigger(hit.voice, hit.velocity);
     const pos = this.transport.positionAtPerfTime(hit.timeStamp);
     const t = this.judgeTime(pos - this.cfg.meta.offset);
+    this.renderer.drumPulse(hit.voice, hit.velocity);
     if (this.cfg.mode === 'record') {
       if (t >= -0.5) this.recorded.push({ time: t, voice: hit.voice, velocity: hit.velocity });
       this.renderer.hitFlash(hit.voice, 'perfect');
@@ -216,8 +238,11 @@ export class GameSession {
   }
 
   private handleJudge(ev: JudgeEvent): void {
-    if (ev.kind === 'hit') this.renderer.hitFlash(ev.voice, ev.judgement);
-    else if (ev.kind === 'overhit') this.renderer.hitFlash(ev.voice, 'over');
+    if (ev.kind === 'hit') {
+      this.renderer.hitFlash(ev.voice, ev.judgement);
+      const note = this.judge.notes[ev.noteIndex];
+      this.renderer.hitGhost(ev.voice, ev.delta, note?.velocity ?? 1, ev.judgement);
+    } else if (ev.kind === 'overhit') this.renderer.hitFlash(ev.voice, 'over');
     else this.renderer.hitFlash(ev.voice, 'miss');
     this.cb.onJudge?.(ev);
     const milestones = [25, 50, 100, 150, 200, 300, 400, 500, 750, 1000];

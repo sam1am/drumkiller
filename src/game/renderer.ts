@@ -65,6 +65,27 @@ interface Flash {
   judgement: Judgement | 'over';
 }
 
+/** A slow-fading imprint of a hit note, pinned where it was relative to the strike line when it was hit. */
+interface HitGhost {
+  voice: DrumVoice;
+  /** Signed timing error in seconds (hit − note): early < 0 → drawn above the strike line, late > 0 → below. */
+  delta: number;
+  velocity: number;
+  judgement: Judgement;
+  t0: number; // performance ms
+}
+
+/** A soft ring spreading out from the horizon when a drum is hit (background visualisation). */
+interface Ripple {
+  color: string;
+  t0: number; // performance ms
+  strength: number;
+}
+
+/** How long a hit ghost lingers (ms). Several stack up to show whether you're running early or late. */
+export const HIT_GHOST_LIFE_MS = 2600;
+const RIPPLE_LIFE_MS = 1800;
+
 /**
  * Canvas 2D pseudo-3D highway renderer. Independent of game logic; the session feeds it a RenderState each frame.
  */
@@ -75,6 +96,13 @@ export class HighwayRenderer {
   private dpr = 1;
   private particles: Particle[] = [];
   private flashes: Flash[] = [];
+  private ghosts: HitGhost[] = [];
+  private ripples: Ripple[] = [];
+  private analyser: AnalyserNode | null = null;
+  private freqData: Uint8Array<ArrayBuffer> | null = null;
+  /** Smoothed spectrum silhouette (0..1 per column) so the aurora breathes instead of flickering. */
+  private spectrum: Float32Array = new Float32Array(0);
+  private bassLevel = 0;
   private shake = 0;
   private flashAlpha = 0;
   private lastFrame = performance.now();
@@ -144,6 +172,28 @@ export class HighwayRenderer {
   }
 
   // ── effects API ──
+  /** Feed the background visualiser from an analyser tapping the mix (song + drums). */
+  setAnalyser(analyser: AnalyserNode | null): void {
+    this.analyser = analyser;
+    this.freqData = analyser ? new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)) : null;
+  }
+
+  /**
+   * Leave a slow-fading copy of a hit note where it was when it was struck: `delta` seconds early puts it
+   * above the strike line, late puts it below. Ghosts accumulate so the spread reads as live timing feedback.
+   */
+  hitGhost(voice: DrumVoice, delta: number, velocity: number, judgement: Judgement): void {
+    this.ghosts.push({ voice, delta, velocity, judgement, t0: performance.now() });
+    if (this.ghosts.length > 64) this.ghosts.splice(0, this.ghosts.length - 64);
+  }
+
+  /** Background ripple for a drum hit (any mode). */
+  drumPulse(voice: DrumVoice, velocity = 1): void {
+    if (this.reduced) return;
+    this.ripples.push({ color: VOICE_COLORS[voice], t0: performance.now(), strength: 0.5 + 0.5 * Math.max(0, Math.min(1, velocity)) });
+    if (this.ripples.length > 24) this.ripples.splice(0, this.ripples.length - 24);
+  }
+
   hitFlash(voice: DrumVoice, judgement: Judgement | 'over'): void {
     const lane = LANE_FOR_VOICE[voice];
     this.flashes.push({ lane, t0: performance.now(), color: judgement === 'over' ? '#ff3b3b' : JUDGE_COLORS[judgement], judgement });
@@ -197,12 +247,17 @@ export class HighwayRenderer {
     ctx.fillStyle = '#07070b';
     ctx.fillRect(0, 0, w, h);
     const accent = state.accent ?? '#ff2d75';
+    this.sampleAudio(dt, !!state.paused);
+    // The horizon glow breathes with the low end of the mix.
+    const breathe = this.reduced ? 0 : this.bassLevel * 0.1;
     const bgGrad = ctx.createRadialGradient(this.cx, this.farY, 10, this.cx, this.strikeY, h);
-    bgGrad.addColorStop(0, hexA(accent, 0.28));
-    bgGrad.addColorStop(0.5, hexA(accent, 0.06));
+    bgGrad.addColorStop(0, hexA(accent, 0.28 + breathe));
+    bgGrad.addColorStop(0.5, hexA(accent, 0.06 + breathe * 0.3));
     bgGrad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, w, h);
+    this.drawAurora(accent);
+    this.drawRipples(now);
 
     // shake
     if (this.shake > 0.1 && !this.reduced) {
@@ -213,9 +268,9 @@ export class HighwayRenderer {
     this.drawRoad(state);
     this.drawBeats(state);
     this.drawReceptors(state, now);
+    this.drawGhosts(state, now);
     this.drawNotes(state);
     if (state.mode === 'record' && state.recorded) this.drawRecorded(state);
-    this.drawComboFire(state, dt);
     this.drawParticles(dt);
     this.drawLaneLabels();
     ctx.restore();
@@ -558,30 +613,138 @@ export class HighwayRenderer {
     ctx.globalAlpha = 1;
   }
 
-  private drawComboFire(state: RenderState, dt: number): void {
-    if (this.reduced) return;
-    const intensity = Math.min(1, state.combo / 50);
-    if (intensity <= 0.02) return;
+  // ── background visualiser ──
+  /** Pull a fresh spectrum from the analyser and ease the silhouette toward it. */
+  private sampleAudio(dt: number, paused: boolean): void {
+    const cols = 96;
+    if (this.spectrum.length !== cols) this.spectrum = new Float32Array(cols);
+    const decay = Math.pow(0.02, dt); // ~ -1 level in 1s when silent
+    if (!this.analyser || !this.freqData || this.reduced) {
+      for (let i = 0; i < cols; i++) this.spectrum[i] *= decay;
+      this.bassLevel *= decay;
+      return;
+    }
+    this.analyser.getByteFrequencyData(this.freqData);
+    const bins = this.freqData.length;
+    // Only the musically useful part of the spectrum (~20 Hz – 8 kHz at 48k / fftSize 1024 ≈ bins 1..170).
+    const maxBin = Math.max(8, Math.min(bins - 1, Math.floor(bins * 0.35)));
+    let bass = 0;
+    for (let i = 0; i < cols; i++) {
+      // log-spaced columns: more resolution for the lows, where the kick and snare live
+      const f0 = Math.pow(i / cols, 1.7);
+      const f1 = Math.pow((i + 1) / cols, 1.7);
+      const b0 = 1 + Math.floor(f0 * (maxBin - 1));
+      const b1 = Math.max(b0 + 1, 1 + Math.ceil(f1 * (maxBin - 1)));
+      let acc = 0;
+      for (let b = b0; b < b1; b++) acc = Math.max(acc, this.freqData[b]);
+      const v = paused ? 0 : acc / 255;
+      const cur = this.spectrum[i];
+      // fast attack, slow release
+      this.spectrum[i] = v > cur ? cur + (v - cur) * Math.min(1, dt * 18) : Math.max(v, cur * Math.pow(0.15, dt));
+      if (i < cols * 0.15) bass = Math.max(bass, v);
+    }
+    const bassTarget = paused ? 0 : Math.max(0, (bass - 0.45) / 0.55);
+    this.bassLevel = bassTarget > this.bassLevel ? this.bassLevel + (bassTarget - this.bassLevel) * Math.min(1, dt * 14) : this.bassLevel * Math.pow(0.05, dt);
+  }
+
+  /**
+   * A soft spectrum silhouette rising out of the horizon — mirrored left/right so it reads as an aurora
+   * behind the road rather than an EQ meter. Faint on purpose: it's ambience, not information.
+   */
+  private drawAurora(accent: string): void {
+    const cols = this.spectrum.length;
+    if (!cols) return;
+    let peak = 0;
+    for (let i = 0; i < cols; i++) if (this.spectrum[i] > peak) peak = this.spectrum[i];
+    if (peak < 0.02) return;
     const ctx = this.ctx;
-    const l = this.cx - this.nearW / 2;
-    const r = this.cx + this.nearW / 2;
-    const t = performance.now() / 1000;
-    const flames = 14;
-    for (let i = 0; i < flames; i++) {
-      const fx = l + ((r - l) * (i + 0.5)) / flames + Math.sin(t * 5 + i) * 6;
-      const hgt = (30 + 70 * intensity) * (0.7 + 0.3 * Math.sin(t * 9 + i * 1.7));
-      const g = ctx.createLinearGradient(0, this.strikeY, 0, this.strikeY - hgt);
-      const hot = state.multiplier >= 4;
-      g.addColorStop(0, hexA(hot ? '#ff2d75' : '#ff7a1a', 0.55 * intensity));
-      g.addColorStop(0.5, hexA('#ffe600', 0.25 * intensity));
-      g.addColorStop(1, 'rgba(255,230,0,0)');
-      ctx.fillStyle = g;
+    const { w } = this;
+    const baseY = this.farY + 2;
+    const maxH = this.h * 0.17;
+    const half = w / 2;
+    // silhouette points from the centre outward: low frequencies in the middle, highs toward the edges
+    const sp = this.spectrum;
+    const yOf = (i: number) => {
+      // 3-tap smoothing across neighbouring columns so the silhouette rolls instead of spiking
+      const v = (sp[Math.max(0, i - 1)] + sp[i] * 2 + sp[Math.min(cols - 1, i + 1)]) / 4;
+      const curve = Math.pow(v, 1.8);
+      return baseY - curve * maxH * (1 - (i / cols) * 0.35);
+    };
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(0, baseY);
+    for (let i = cols - 1; i >= 0; i--) ctx.lineTo(this.cx - ((i + 0.5) / cols) * half, yOf(i));
+    for (let i = 0; i < cols; i++) ctx.lineTo(this.cx + ((i + 0.5) / cols) * half, yOf(i));
+    ctx.lineTo(w, baseY);
+    ctx.closePath();
+    const fill = ctx.createLinearGradient(0, baseY - maxH, 0, baseY);
+    fill.addColorStop(0, hexA(accent, 0));
+    fill.addColorStop(0.6, hexA(accent, 0.06));
+    fill.addColorStop(1, hexA(accent, 0.16));
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = hexA(accent, 0.18);
+    ctx.lineWidth = 1.2;
+    ctx.shadowColor = accent;
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    // reflection below the horizon: a fainter, squashed mirror that the road then sits on top of
+    ctx.globalAlpha = 0.35;
+    ctx.translate(0, baseY * 2);
+    ctx.scale(1, -0.45);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /** Concentric rings drifting out from the horizon for each drum hit, in the drum's colour, very faint. */
+  private drawRipples(now: number): void {
+    this.ripples = this.ripples.filter((r) => now - r.t0 < RIPPLE_LIFE_MS);
+    if (!this.ripples.length) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineWidth = 1.5;
+    for (const r of this.ripples) {
+      const p = (now - r.t0) / RIPPLE_LIFE_MS;
+      const ease = 1 - Math.pow(1 - p, 2.2);
+      const rx = 40 + ease * this.w * 0.7;
+      const ry = 12 + ease * this.h * 0.55;
+      const alpha = (1 - p) * (1 - p) * 0.12 * r.strength;
+      ctx.strokeStyle = hexA(r.color, alpha);
       ctx.beginPath();
-      ctx.moveTo(fx - 18, this.strikeY + 4);
-      ctx.quadraticCurveTo(fx - 6, this.strikeY - hgt * 0.5, fx, this.strikeY - hgt);
-      ctx.quadraticCurveTo(fx + 6, this.strikeY - hgt * 0.5, fx + 18, this.strikeY + 4);
-      ctx.closePath();
-      ctx.fill();
+      ctx.ellipse(this.cx, this.farY, rx, ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // ── hit ghosts ──
+  private drawGhosts(state: RenderState, now: number): void {
+    this.ghosts = this.ghosts.filter((g) => now - g.t0 < HIT_GHOST_LIFE_MS);
+    const ctx = this.ctx;
+    for (const g of this.ghosts) {
+      const p = (now - g.t0) / HIT_GHOST_LIFE_MS;
+      const alpha = 0.42 * (1 - p) * (1 - p);
+      if (alpha < 0.01) continue;
+      // early → the note was still above the strike line; late → it had passed it
+      const z = -g.delta / state.window;
+      this.drawNote(g.voice, z, g.velocity, alpha, false);
+      // a thin tick in the judgement colour at the exact hit position, so the offset is legible even when
+      // the note shape is small
+      const lane = LANE_FOR_VOICE[g.voice];
+      const y = this.yAt(z);
+      const nearX = lane === 'crash' ? this.cx : this.laneCenterNear(lane);
+      const x = this.xAt(nearX, z);
+      const half = (this.nearW / this.laneOrder.length) * this.widthScaleAt(z) * 0.5;
+      ctx.globalAlpha = Math.min(1, alpha * 1.4);
+      ctx.strokeStyle = JUDGE_COLORS[g.judgement];
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x - half, y);
+      ctx.lineTo(x + half, y);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
     }
   }
 
