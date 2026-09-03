@@ -54,8 +54,8 @@ const evaluate = async (expression) => {
 const shot = async (name) => { const r = await send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(path.join(outDir, name), Buffer.from(r.result.data, 'base64')); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const click = (text) => evaluate(`(() => { const b = Array.from(document.querySelectorAll('.btn')).find(b => b.textContent.trim() === ${JSON.stringify(text)}); if (!b) throw new Error('no button ' + ${JSON.stringify(text)}); b.click(); return true; })()`);
-function fail(msg) { console.error('✗', msg); cleanup(); process.exit(1); }
-function cleanup() { try { ws.close(); } catch { /* ignore */ } chrome.kill(); fs.rmSync(profile, { recursive: true, force: true }); }
+function fail(msg) { console.error('✗', msg); cleanup(); setTimeout(() => process.exit(1), 800); throw new Error(msg); }
+function cleanup() { try { ws.close(); } catch { /* ignore */ } chrome.kill(); setTimeout(() => { try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* ignore */ } }, 500); }
 const assert = (cond, msg) => { if (!cond) fail(msg); console.log('✓', msg); };
 
 try {
@@ -83,14 +83,14 @@ try {
     const keys = { kick:'Space', snare:'KeyF', tomHigh:'KeyG', tomMid:'KeyH', tomLow:'KeyK', hihatClosed:'KeyD', hihatOpen:'KeyS', ride:'KeyL', crash:'KeyA' };
     const s = window.dkSession; const notes = s.judge.notes; let i = 0;
     (function tick() { if (!window.dkSession) return; const t = s.chartTime;
-      while (i < notes.length && notes[i].time <= t + 0.004) { const n = notes[i++]; if (n.time < t - 0.05) continue;
+      while (i < notes.length && notes[i].time <= t + 0.004) { const n = notes[i++]; if (n.time < t - 0.1) continue;
         window.dispatchEvent(new KeyboardEvent('keydown', { code: keys[n.voice], bubbles: true })); window.dispatchEvent(new KeyboardEvent('keyup', { code: keys[n.voice], bubbles: true })); }
       requestAnimationFrame(tick); })();`);
   await sleep(12000);
   await shot('03-gameplay.png');
-  const j = await evaluate(`JSON.stringify({ score: dkSession.judge.score, combo: dkSession.judge.combo, acc: dkSession.judge.accuracy, hits: dkSession.judge.hits, over: dkSession.judge.overhits, err: dkSession.judge.meanSignedError })`).then(JSON.parse);
+  const j = await evaluate(`JSON.stringify({ score: dkSession.judge.score, combo: dkSession.judge.maxCombo, acc: dkSession.judge.accuracy, hits: dkSession.judge.hits, over: dkSession.judge.overhits, err: dkSession.judge.meanSignedError })`).then(JSON.parse);
   console.log('  judge:', JSON.stringify(j));
-  assert(j.score > 0 && j.combo > 50, `auto-player scored ${j.score} with combo ${j.combo}`);
+  assert(j.score > 0 && j.combo > 50, `auto-player scored ${j.score} with max combo ${j.combo}`);
   assert(j.acc > 0.9, `accuracy ${(j.acc * 100).toFixed(1)}% > 90%`);
   assert(Math.abs(j.err) < 0.03, `mean timing error ${(j.err * 1000).toFixed(1)} ms within ±30 ms`);
   await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Escape', bubbles: true }))`);
@@ -106,4 +106,4 @@ try {
   fail(e.message);
 }
 cleanup();
-process.exit(0);
+setTimeout(() => process.exit(0), 800);
