@@ -3,8 +3,8 @@
  *
  * Composites, every frame, into an offscreen 16:9 canvas, side by side:
  *   1. the webcam in a full-height portrait column on the left (CAM_FRACTION of the width),
- *   2. the highway canvas centred in the remaining area (cropped to fill; letterboxed if that would
- *      cut too much away),
+ *   2. the highway canvas at full height, centred in the remaining area (the sides are trimmed —
+ *      the road itself is at most 980 CSS px wide and centred, so lanes survive any sane window),
  *   3. a repaint of the HUD (score, combo, judgements, song info…) — the real HUD is DOM, so it
  *      would be missing from a plain canvas capture.
  *
@@ -17,8 +17,6 @@
 export const CAM_FRACTION = 0.3;
 /** Aspect ratio (w/h) of the camera column — the HUD preview uses the same crop. */
 export const CAM_ASPECT = (CAM_FRACTION * 16) / 9;
-/** Crop at most this fraction of the highway's width/height to fill the game area; letterbox beyond that. */
-const MAX_CROP = 0.35;
 
 export interface HudSnapshot {
   score: string;
@@ -198,12 +196,9 @@ export class VideoRecorder {
     const src = this.opts.highway;
     if (!src.width || !src.height) return;
     const r = this.gameRect();
-    // Fill the game area, cropping the highway's edges symmetrically so the road stays centred;
-    // if that would crop more than MAX_CROP, letterbox instead so lanes are never lost.
-    const cover = Math.max(r.w / src.width, r.h / src.height);
-    const contain = Math.min(r.w / src.width, r.h / src.height);
-    const cropped = 1 - contain / cover; // fraction of the larger axis that cover would discard
-    const scale = cropped <= MAX_CROP ? cover : contain;
+    // Always full height; trim the sides symmetrically so the road stays centred. (On a window
+    // narrower than the game area's aspect the top/bottom are trimmed instead.)
+    const scale = Math.max(r.w / src.width, r.h / src.height);
     const w = src.width * scale;
     const h = src.height * scale;
     ctx.save();
