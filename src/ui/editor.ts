@@ -26,6 +26,8 @@ const MIN_PPS = 20;
 const MAX_PPS = 600;
 /** Two notes on the same drum closer than this are the same note. */
 const SAME_SPOT = 0.002;
+/** Rows of vertical drag it takes to sweep a note's velocity from 0 to 1. */
+const VEL_DRAG_ROWS = 2;
 /** Where the playhead sits (fraction of the visible timeline) while the chart scrolls past it. */
 const PLAYHEAD_FRAC = 0.25;
 
@@ -312,6 +314,29 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
       }
     }
 
+    // velocity readout while dragging a note up/down
+    if (drag?.kind === 'move' && drag.axis === 'velocity') {
+      const hitId = drag.hitId;
+      const hit = notes.find((n) => n.id === hitId);
+      if (hit) {
+        const x = xOf(hit.time);
+        const y = yOf(hit.voice);
+        const label = `${Math.round(hit.velocity * 100)}`;
+        ctx.font = '700 12px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const w = ctx.measureText(label).width + 12;
+        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        ctx.fillRect(x - w / 2, y - 22, w, 18);
+        ctx.strokeStyle = VOICE_COLORS[hit.voice];
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x - w / 2 + 0.5, y - 21.5, w - 1, 17);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, x, y - 13);
+        ctx.textBaseline = 'alphabetic';
+      }
+    }
+
     // marquee
     if (drag?.kind === 'marquee') {
       ctx.strokeStyle = 'rgba(255,255,255,0.7)';
@@ -362,7 +387,16 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
 
   // ── interaction ──
   type Drag =
-    | { kind: 'move'; ids: number[]; startT: number; startRow: number; origin: Map<number, { time: number; voice: DrumVoice }>; moved: boolean; pushed: boolean }
+    | {
+        kind: 'move';
+        /** The note under the pointer when the drag started. */
+        hitId: number;
+        startT: number;
+        startY: number;
+        origin: Map<number, { time: number; velocity: number }>;
+        /** Locked to the dominant direction once the pointer travels far enough: sideways moves in time, up/down changes velocity. */
+        axis: 'none' | 'time' | 'velocity';
+      }
     | { kind: 'marquee'; x0: number; y0: number; x1: number; y1: number; additive: boolean }
     | { kind: 'scrub' };
   let drag: Drag | null = null;
@@ -433,10 +467,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
         selected.clear();
         selected.add(hit.id);
       }
-      const ids = Array.from(selected);
-      const origin = new Map<number, { time: number; voice: DrumVoice }>();
-      for (const n of notes) if (selected.has(n.id)) origin.set(n.id, { time: n.time, voice: n.voice });
-      drag = { kind: 'move', ids, startT: tOf(x), startRow: Math.floor((y - RULER_H) / ROW_H), origin, moved: false, pushed: false };
+      drag = startMoveDrag(hit.id, x, y);
       app.kit.trigger(hit.voice, hit.velocity);
       draw();
       return;
@@ -445,13 +476,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
       drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y, additive: e.shiftKey };
       return;
     }
-    // click on empty space: add a note (unless something is selected — then deselect first)
-    if (selected.size) {
-      selected.clear();
-      drag = { kind: 'marquee', x0: x, y0: y, x1: x, y1: y, additive: false };
-      draw();
-      return;
-    }
+    // click on empty space: drop any selection and add a note there in the same tap
     const voice = rowVoice(y);
     if (!voice) return;
     const t = Math.max(0, snapTime(tOf(x)));
@@ -471,6 +496,15 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     selected.add(n.id);
     app.kit.trigger(voice, n.velocity);
     commit();
+    // keep holding and drag: sideways moves the new note, up/down sets its velocity
+    drag = startMoveDrag(n.id, x, y);
+  }
+
+  /** Begin a drag on `hitId` with the whole selection along for the ride. Undo is pushed once the drag actually moves. */
+  function startMoveDrag(hitId: number, x: number, y: number): Drag {
+    const origin = new Map<number, { time: number; velocity: number }>();
+    for (const n of notes) if (selected.has(n.id)) origin.set(n.id, { time: n.time, velocity: n.velocity });
+    return { kind: 'move', hitId, startT: tOf(x), startY: y, origin, axis: 'none' };
   }
 
   function onPointerMove(e: PointerEvent): void {
@@ -494,21 +528,33 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
       draw();
       return;
     }
-    // move
+    // move / velocity
     const dt = tOf(x) - drag.startT;
-    const dRow = Math.max(-rows.length, Math.min(rows.length, (row >= 0 ? row : drag.startRow) - drag.startRow));
-    if (!drag.moved && Math.abs(dt * pps) < 3 && dRow === 0) return;
-    if (!drag.pushed) {
+    const dx = dt * pps;
+    const dy = y - drag.startY;
+    if (drag.axis === 'none') {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      drag.axis = Math.abs(dx) >= Math.abs(dy) ? 'time' : 'velocity';
       pushUndo();
-      drag.pushed = true;
     }
-    drag.moved = true;
-    for (const n of notes) {
-      const o = drag.origin.get(n.id);
-      if (!o) continue;
-      n.time = Math.max(0, snapTime(o.time + dt));
-      const r = Math.max(0, Math.min(rows.length - 1, rowOf(o.voice) + dRow));
-      n.voice = rows[r];
+    if (drag.axis === 'time') {
+      for (const n of notes) {
+        const o = drag.origin.get(n.id);
+        if (o) n.time = Math.max(0, snapTime(o.time + dt));
+      }
+    } else {
+      // dragging up a full row height adds ~VEL_DRAG_RANGE of velocity
+      const dv = -dy / (ROW_H * VEL_DRAG_ROWS);
+      for (const n of notes) {
+        const o = drag.origin.get(n.id);
+        if (o) n.velocity = Math.max(0.05, Math.min(1, Math.round((o.velocity + dv) * 100) / 100));
+      }
+      const hitId = drag.hitId;
+      const hit = notes.find((n) => n.id === hitId);
+      if (hit) {
+        velocityForNew = hit.velocity;
+        velSlider.value = String(hit.velocity);
+      }
     }
     player.setNotes(notes);
     updateStatus();
@@ -530,7 +576,12 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
           if (nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1) selected.add(n.id);
         }
       }
-    } else if (drag.kind === 'move' && drag.moved) {
+    } else if (drag.kind === 'move' && drag.axis !== 'none') {
+      if (drag.axis === 'velocity') {
+        const hitId = drag.hitId;
+        const hit = notes.find((n) => n.id === hitId);
+        if (hit) app.kit.trigger(hit.voice, hit.velocity);
+      }
       commit(); // dedupes notes dragged onto another note
     }
     drag = null;
@@ -722,7 +773,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   };
   const titleEl = h('span');
   let velocityForNew = 0.9;
-  const velSlider = h('input', { class: 'input', type: 'range', min: 0.05, max: 1, step: 0.05, value: velocityForNew, style: { width: '110px' }, onInput: (e: Event) => { velocityForNew = Number((e.target as HTMLInputElement).value); setSelectedVelocity(velocityForNew); } });
+  const velSlider = h('input', { class: 'input', type: 'range', min: 0.05, max: 1, step: 0.01, value: velocityForNew, style: { width: '110px' }, onInput: (e: Event) => { velocityForNew = Number((e.target as HTMLInputElement).value); setSelectedVelocity(velocityForNew); } });
   const diffSel = select(DIFFICULTIES.map((d) => ({ value: d, label: `${d.toUpperCase()}${pkg.meta.charts?.[d] ? '' : ' (auto)'}` })), difficulty, async (v) => {
     if (dirty && !confirm('Discard unsaved changes to this difficulty?')) {
       diffSel.value = difficulty;
@@ -761,7 +812,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     button('PLAY IT', async () => { await save(); app.navigate('game', { pkg, difficulty, mode: 'play' }); }),
   );
   const help = h('div', { class: 'small mute editor-help' },
-    'Click empty space = add note · drag = move (rows change the drum) · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
+    'Click empty space = add note (drops the old selection) · drag a note sideways = move, up/down = velocity · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
     h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing',
   );
 
