@@ -136,7 +136,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     const bpmInput = h('input', { class: 'input', type: 'number', step: 0.01, min: 20, max: 300, value: meta.bpm, onChange: (e: Event) => { meta.bpm = Number((e.target as HTMLInputElement).value) || 120; picker?.setBpm(meta.bpm); } });
     const offsetInput = h('input', { class: 'input', type: 'number', step: 0.001, value: meta.offset, onChange: (e: Event) => { meta.offset = Number((e.target as HTMLInputElement).value) || 0; picker?.setOffset(meta.offset); } });
     picker?.dispose();
-    picker = offsetPicker(app, buf, meta.offset, meta.bpm, (v) => { meta.offset = v; offsetInput.value = String(v); });
+    picker = offsetPicker(app, buf, meta.offset, meta.bpm, (v) => { meta.offset = v; offsetInput.value = String(v); }, (b) => { meta.bpm = b; bpmInput.value = String(b); });
     // tap tempo
     const taps: number[] = [];
     const tapBtn = button('TAP TEMPO', () => {

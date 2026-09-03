@@ -6,6 +6,8 @@ import { h, button } from './dom';
 
 export interface OffsetPicker {
   el: HTMLElement;
+  /** Where the zoomed view is centred (seconds into the audio). */
+  getViewCenter(): number;
   setOffset(seconds: number): void;
   setBpm(bpm: number): void;
   getOffset(): number;
@@ -20,14 +22,20 @@ const ZOOMS = [3, 1, 0.25];
  * zoomed view (±3 s / ±1 s / ±0.25 s), nudge by ms, and audition ±3 s around the mark with the
  * metronome clicking exactly on the mark and every beat after it.
  */
-export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: number, initialBpm: number, onChange: (offset: number) => void): OffsetPicker {
+export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: number, initialBpm: number, onChange: (offset: number) => void, onBpmChange: (bpm: number) => void = () => undefined): OffsetPicker {
   const duration = buffer.duration;
   let offset = clamp(initialOffset);
   let bpm = initialBpm;
   let zoom = ZOOMS[0];
+  /** Where the zoomed view is centred. Follows the mark until the user scrolls away to check the tempo. */
+  let viewCenter = offset;
+  // Copy the channel data out NOW: once the buffer is handed to a playback node the browser detaches
+  // the arrays returned by getChannelData(), which is why reading them while auditioning drew nothing.
   const channels: Float32Array[] = [];
   for (let c = 0; c < buffer.numberOfChannels; c++) channels.push(buffer.getChannelData(c));
-  const env = computeEnvelope(channels, buffer.sampleRate, 200);
+  const env = computeEnvelope(channels, buffer.sampleRate, 200); // overview
+  const fine = computeEnvelope(channels, buffer.sampleRate, 4000); // zoomed view (0.25 ms bins)
+  channels.length = 0;
 
   function clamp(v: number): number {
     return Math.max(0, Math.min(duration, Math.round(v * 1000) / 1000));
@@ -46,20 +54,20 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     transport.load(buffer);
     metro = new Metronome(app.engine, transport);
     metro.setTempoMap(constantTempoMap(bpm), DEFAULT_PPQ, [{ tick: 0, numerator: 4, denominator: 4 }]);
-    metro.setOffset(offset); // chart time 0 = the mark → first click lands exactly on it
+    metro.setOffset(offset); // chart time 0 = the mark → clicks land on the mark and every beat after it
     await metro.prepare();
-    const from = Math.max(0, offset - 3);
-    const until = Math.min(duration, offset + 3);
+    // Start 3 s before the mark (or before wherever the view was scrolled to), then keep going:
+    // the zoomed waveform scrolls under the centred playhead until you stop or the song ends.
+    const from = Math.max(0, viewCenter - 3);
     transport.play(from);
+    transport.onEnded = () => stop();
+    metro.setEnabled(clickOn);
     metro.start();
     playing = true;
-    playBtn.textContent = '■ STOP';
+    updatePlayLabel();
     const loop = () => {
       if (!transport) return;
-      if (transport.position >= until) {
-        stop();
-        return;
-      }
+      viewCenter = Math.max(0, Math.min(duration, transport.position));
       draw();
       raf = requestAnimationFrame(loop);
     };
@@ -73,8 +81,13 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     metro = null;
     transport = null;
     playing = false;
-    playBtn.textContent = '▶ PLAY ±3s AROUND MARK';
+    updatePlayLabel();
     draw();
+  }
+
+  function updatePlayLabel(): void {
+    playBtn.textContent = playing ? '■ STOP' : '▶ PLAY';
+    playBtn.title = playing ? 'Stop' : `Play from 3 s before ${Math.abs(viewCenter - offset) < 0.0005 ? 'the mark' : `${viewCenter.toFixed(1)}s`} — the view follows the playhead`;
   }
 
   // ── canvases ──
@@ -116,10 +129,17 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
       ctx.fillRect(x, mid - hi * amp, 1, Math.max(1, (hi - lo) * amp));
     }
     // zoom window
-    const zx0 = ((offset - zoom) / duration) * w;
-    const zx1 = ((offset + zoom) / duration) * w;
+    const zx0 = ((viewCenter - zoom) / duration) * w;
+    const zx1 = ((viewCenter + zoom) / duration) * w;
     ctx.fillStyle = 'rgba(255,45,117,0.15)';
     ctx.fillRect(zx0, 0, Math.max(2, zx1 - zx0), hh);
+    // bar ticks along the bottom edge: at the right BPM they stay locked to the downbeats all song long
+    const barLen = (60 / bpm) * 4;
+    ctx.fillStyle = 'rgba(255,230,0,0.7)';
+    for (let k = 0; offset + k * barLen <= duration; k++) {
+      const x = ((offset + k * barLen) / duration) * w;
+      ctx.fillRect(x, hh - (k % 4 === 0 ? 8 : 4), 1, k % 4 === 0 ? 8 : 4);
+    }
     // mark
     const mx = (offset / duration) * w;
     ctx.strokeStyle = '#ff2d75';
@@ -143,70 +163,81 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     const { ctx, w, h: hh } = setupCanvas(zoomCanvas);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, w, hh);
-    const t0 = offset - zoom;
-    const t1 = offset + zoom;
+    const t0 = viewCenter - zoom;
+    const t1 = viewCenter + zoom;
     const xOf = (t: number) => ((t - t0) / (t1 - t0)) * w;
     const mid = hh / 2;
     const amp = hh / 2 - 14;
-    // waveform straight from samples (accurate at any zoom)
-    const sr = buffer.sampleRate;
-    const spp = ((t1 - t0) * sr) / w; // samples per pixel
-    const inv = 1 / channels.length;
+    // waveform from the fine envelope (0.25 ms bins — accurate down to the ±0.25 s zoom)
+    const bps = fine.binsPerSecond;
     for (let x = 0; x < w; x++) {
-      const s0 = Math.floor((t0 + (x / w) * (t1 - t0)) * sr);
-      const s1 = Math.floor(s0 + spp);
-      if (s1 < 0 || s0 >= buffer.length) continue;
+      const ta = t0 + (x / w) * (t1 - t0);
+      const tb = t0 + ((x + 1) / w) * (t1 - t0);
+      const b0 = Math.floor(ta * bps);
+      const b1 = Math.max(b0, Math.ceil(tb * bps) - 1);
+      if (b1 < 0 || b0 >= fine.max.length) continue;
       let lo = 0;
       let hi = 0;
-      const step = Math.max(1, Math.floor(spp / 64)); // cap work per pixel
-      for (let i = Math.max(0, s0); i < Math.min(buffer.length, s1); i += step) {
-        let v = 0;
-        for (const ch of channels) v += ch[i];
-        v *= inv;
-        if (v > hi) hi = v;
-        if (v < lo) lo = v;
+      for (let b = Math.max(0, b0); b <= Math.min(fine.max.length - 1, b1); b++) {
+        if (fine.max[b] > hi) hi = fine.max[b];
+        if (fine.min[b] < lo) lo = fine.min[b];
       }
-      const past = t0 + (x / w) * (t1 - t0) < offset;
-      ctx.fillStyle = past ? 'rgba(255,255,255,0.35)' : '#ff2d75';
+      ctx.fillStyle = ta < offset ? 'rgba(255,255,255,0.35)' : '#ff2d75';
       ctx.fillRect(x, mid - hi * amp, 1, Math.max(1, (hi - lo) * amp));
     }
-    // beat grid after the mark (and before, faint) from the bpm
+    // tempo grid: a tick on every beat (tall on bar downbeats) anchored to the mark — if the ticks drift
+    // off the transients further into the song, the BPM is off; nudge it until they lock in.
     const beat = 60 / bpm;
-    for (let k = -Math.ceil(zoom / beat); k * beat <= zoom; k++) {
+    const kFirst = Math.ceil((t0 - offset) / beat);
+    const kLast = Math.floor((t1 - offset) / beat);
+    for (let k = kFirst; k <= kLast; k++) {
       const t = offset + k * beat;
-      if (t < t0 || t > t1) continue;
       const x = xOf(t);
-      const bar = k % 4 === 0;
-      ctx.strokeStyle = k < 0 ? 'rgba(255,255,255,0.08)' : bar ? 'rgba(255,230,0,0.6)' : 'rgba(255,230,0,0.25)';
+      const bar = ((k % 4) + 4) % 4 === 0;
+      const before = k < 0;
+      ctx.strokeStyle = before ? 'rgba(255,255,255,0.12)' : bar ? 'rgba(255,230,0,0.55)' : 'rgba(255,230,0,0.22)';
       ctx.lineWidth = bar ? 1.5 : 1;
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, hh);
       ctx.stroke();
-      if (k >= 0 && (bar || zoom <= 1)) {
-        ctx.fillStyle = 'rgba(255,230,0,0.7)';
+      // solid tick marks at the top and bottom edges so the beat position reads even over loud audio
+      ctx.fillStyle = before ? 'rgba(255,255,255,0.4)' : '#ffe600';
+      const tl = bar ? 12 : 6;
+      ctx.fillRect(x - 1, 0, 2, tl);
+      ctx.fillRect(x - 1, hh - tl, 2, tl);
+      if (!before && (bar || zoom <= 1)) {
+        ctx.fillStyle = 'rgba(255,230,0,0.8)';
         ctx.font = '10px "JetBrains Mono", monospace';
         ctx.textAlign = 'left';
-        ctx.fillText(k === 0 ? 'BEAT 1' : `${Math.floor(k / 4) + 1}.${(k % 4) + 1}`, x + 3, hh - 4);
+        ctx.fillText(k === 0 ? 'BEAT 1' : `${Math.floor(k / 4) + 1}.${(k % 4) + 1}`, x + 3, hh - 14);
       }
     }
     // mark
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.shadowColor = '#ff2d75';
-    ctx.shadowBlur = 10;
-    ctx.beginPath();
-    ctx.moveTo(w / 2, 0);
-    ctx.lineTo(w / 2, hh);
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = '#fff';
-    ctx.beginPath();
-    ctx.moveTo(w / 2 - 6, 0);
-    ctx.lineTo(w / 2 + 6, 0);
-    ctx.lineTo(w / 2, 7);
-    ctx.closePath();
-    ctx.fill();
+    const mx = xOf(offset);
+    if (mx >= -2 && mx <= w + 2) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#ff2d75';
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.moveTo(mx, 0);
+      ctx.lineTo(mx, hh);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.moveTo(mx - 6, 0);
+      ctx.lineTo(mx + 6, 0);
+      ctx.lineTo(mx, 7);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.font = '10px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`mark at ${offset.toFixed(3)}s ${mx < 0 ? '◀' : '▶'}`, w / 2, 11 + 12);
+    }
     // playhead
     if (transport) {
       const px = xOf(transport.position);
@@ -222,19 +253,36 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     ctx.textAlign = 'right';
     ctx.fillText(`+${zoom}s`, w - 4, 11);
     ctx.textAlign = 'center';
-    ctx.fillText('drag to fine-tune', w / 2, 11 + 12);
+    ctx.fillText(`${bpm.toFixed(2)} BPM · drag waveform = move mark`, w / 2, 11);
   }
 
   function draw(): void {
     drawOverview();
     drawZoom();
     readout.textContent = `${offset.toFixed(3)} s`;
+    bpmReadout.textContent = `${bpm.toFixed(2)}`;
+    updatePlayLabel();
   }
 
   function set(v: number, notify = true): void {
+    const follow = Math.abs(viewCenter - offset) < 0.0005;
     offset = clamp(v);
+    if (follow) viewCenter = offset;
     draw();
     if (notify) onChange(offset);
+  }
+  function setBpmLocal(b: number, notify = true): void {
+    bpm = Math.max(20, Math.min(300, Math.round(b * 100) / 100));
+    draw();
+    if (notify) onBpmChange(bpm);
+  }
+  function setView(t: number): void {
+    viewCenter = Math.max(0, Math.min(duration, t));
+    if (playing) {
+      transport?.seek(Math.max(0, viewCenter - 3));
+      metro?.resync();
+    }
+    draw();
   }
 
   // ── pointer handling ──
@@ -248,7 +296,14 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
   overview.addEventListener('pointerdown', (e) => {
     overview.setPointerCapture(e.pointerId);
     dragging = 'overview';
-    set(overviewAt(e));
+    if (e.shiftKey) setView(overviewAt(e));
+    else {
+      viewCenter = offset; // re-follow the mark
+      set(overviewAt(e));
+    }
+  });
+  overview.addEventListener('pointermove', (e) => {
+    if (dragging === 'overview' && e.shiftKey) setView(overviewAt(e));
   });
   overview.addEventListener('pointermove', (e) => {
     if (dragging === 'overview') set(overviewAt(e));
@@ -278,21 +333,39 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
   }, { passive: false });
 
   // ── controls ──
-  const playBtn = button('▶ PLAY ±3s AROUND MARK', () => (playing ? stop() : play()), 'primary');
+  const playBtn = button('▶ PLAY', () => (playing ? stop() : play()), 'primary');
+  let clickOn = true;
+  const clickBtn = button('CLICK: ON', () => { clickOn = !clickOn; clickBtn.textContent = `CLICK: ${clickOn ? 'ON' : 'OFF'}`; metro?.setEnabled(clickOn); }, 'icon small');
   const nudge = (ms: number) => button(`${ms > 0 ? '+' : '−'}${Math.abs(ms)}`, () => set(offset + ms / 1000), 'icon small');
+  const barLen = () => (60 / bpm) * 4;
+  const bpmReadout = h('span', { class: 'mono', style: { minWidth: '64px', display: 'inline-block', textAlign: 'center' } });
+  const bpmNudge = (d: number) => button(`${d > 0 ? '+' : '−'}${Math.abs(d)}`, () => setBpmLocal(bpm + d), 'icon small');
+  const viewBtn = (label: string, fn: () => void, title: string) => { const b = button(label, fn, 'icon small'); b.title = title; return b; };
   const zoomBtns = ZOOMS.map((z) => button(`±${z}s`, () => { zoom = z; zoomBtns.forEach((b, i) => b.classList.toggle('primary', ZOOMS[i] === z)); draw(); }, `icon small ${z === zoom ? 'primary' : ''}`));
   const el = h('div', { class: 'offset-picker', tabIndex: 0 },
     overview,
     zoomCanvas,
     h('div', { class: 'row', style: { marginTop: '8px', gap: '8px' } },
       playBtn,
+      clickBtn,
       h('span', { class: 'small dim' }, 'Mark:'), readout,
       nudge(-100), nudge(-10), nudge(-1), nudge(1), nudge(10), nudge(100),
       h('span', { class: 'small dim', style: { marginLeft: '6px' } }, 'ms'),
       h('span', { class: 'spacer', style: { flex: 1 } }),
       h('span', { class: 'small dim' }, 'Zoom'), ...zoomBtns,
     ),
-    h('div', { class: 'small mute', style: { marginTop: '4px' } }, 'The white line is beat 1 of bar 1. Yellow lines show where the beats will fall at the current BPM. Arrow keys nudge ±10 ms (shift: ±1 ms).'),
+    h('div', { class: 'row', style: { marginTop: '6px', gap: '8px' } },
+      h('span', { class: 'small dim' }, 'View:'),
+      viewBtn('⏮ MARK', () => setView(offset), 'Centre the view on the mark'),
+      viewBtn('◀ BAR', () => setView(viewCenter - barLen()), 'One bar earlier'),
+      viewBtn('BAR ▶', () => setView(viewCenter + barLen()), 'One bar later'),
+      viewBtn('8 BARS ▶', () => setView(viewCenter + barLen() * 8), 'Eight bars later — check the ticks still sit on the beats'),
+      viewBtn('32 BARS ▶', () => setView(viewCenter + barLen() * 32), 'Thirty-two bars later'),
+      h('span', { class: 'spacer', style: { flex: 1 } }),
+      h('span', { class: 'small dim' }, 'BPM:'), bpmReadout,
+      bpmNudge(-1), bpmNudge(-0.1), bpmNudge(-0.01), bpmNudge(0.01), bpmNudge(0.1), bpmNudge(1),
+    ),
+    h('div', { class: 'small mute', style: { marginTop: '4px' } }, 'White line = beat 1 of bar 1 (the mark). Yellow ticks = every beat at the current BPM, tall on downbeats. PLAY starts 3 s before the mark and keeps going with the waveform scrolling under the playhead; watch whether the ticks stay on the hits — if they creep, nudge the BPM until they lock in. Shift-click the overview to move the view without moving the mark. Arrow keys nudge the mark ±10 ms (shift: ±1 ms).'),
   );
   el.addEventListener('keydown', (e) => {
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
@@ -310,11 +383,9 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
 
   return {
     el,
+    getViewCenter: () => viewCenter,
     setOffset: (v) => set(v, false),
-    setBpm: (b) => {
-      bpm = b;
-      draw();
-    },
+    setBpm: (b) => setBpmLocal(b, false),
     getOffset: () => offset,
     stop,
     dispose: () => {
