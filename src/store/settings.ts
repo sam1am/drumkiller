@@ -1,6 +1,6 @@
 /** User settings persisted through a KV, always merged over DEFAULT_SETTINGS. */
 import type { DrumVoice, Settings } from '@/types';
-import { DEFAULT_KEYBOARD, DEFAULT_SETTINGS, DRUM_VOICES } from '@/types';
+import { DEFAULT_KEYBOARD, DEFAULT_SETTINGS, DRUM_VOICES, LANE_ORDER, type Lane } from '@/types';
 import { readJson, writeJson, type KV } from './kv';
 
 export const SETTINGS_KEY = 'dk.settings.v1';
@@ -24,6 +24,15 @@ function clamp01(n: unknown, fallback: number): number {
 }
 
 /** Merge an arbitrary (possibly partial or corrupt) object over the defaults. */
+/** A lane order is valid only if it is a permutation of the five vertical lanes. */
+export function mergeLaneOrder(raw: unknown): Lane[] {
+  if (Array.isArray(raw) && raw.length === LANE_ORDER.length) {
+    const set = new Set(raw as unknown[]);
+    if (set.size === LANE_ORDER.length && LANE_ORDER.every((l) => set.has(l))) return [...(raw as Lane[])];
+  }
+  return [...LANE_ORDER];
+}
+
 export function mergeSettings(raw: unknown): Settings {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Partial<Record<keyof Settings, unknown>>;
   const d = DEFAULT_SETTINGS;
@@ -45,6 +54,7 @@ export function mergeSettings(raw: unknown): Settings {
         ? r.hitWindowScale
         : d.hitWindowScale,
     strictVoices: typeof r.strictVoices === 'boolean' ? r.strictVoices : d.strictVoices,
+    laneOrder: mergeLaneOrder(r.laneOrder),
   };
   if (typeof r.lastDeviceKey === 'string' && r.lastDeviceKey) settings.lastDeviceKey = r.lastDeviceKey;
   return settings;

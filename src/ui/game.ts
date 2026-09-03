@@ -1,6 +1,8 @@
 import type { App, Screen } from '@/app';
 import type { Chart, Difficulty, PerformanceNote, ScoreSummary, SongPackage } from '@/types';
-import { DRUM_VOICES } from '@/types';
+import { DRUM_VOICES, LANE_FOR_VOICE } from '@/types';
+import { WaveformStrip } from '@/game/waveform';
+import { VOICE_COLORS } from '@/game/renderer';
 import { chartFromMidi, deriveDifficulty, parseMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
 import { getChartBlob, hardestAvailable } from '@/song';
 import { GameSession, type GameMode } from '@/game/session';
@@ -66,6 +68,8 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
   const countdownEl = h('div', { class: 'countdown' });
   const modeTag = h('div', { class: 'mode-tag' });
   const timingEl = h('div', { class: 'timing' }, '');
+  const waveCanvas = h('canvas', { class: 'wave-strip' });
+  let wave: WaveformStrip | null = null;
   const practiceBar = h('div', { class: 'practice-bar' });
   const loading = h('div', { class: 'pause-overlay' }, h('div', { class: 'display', style: { fontFamily: 'var(--font-display)', fontSize: '28px' } }, 'LOADING…'));
 
@@ -82,9 +86,10 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     h('div', { class: 'acc-box' }, accEl, starsEl),
     practiceBar,
     timingEl,
+    mode === 'record' ? waveCanvas : null,
     countdownEl,
   );
-  const el = h('div', { class: 'screen game' }, canvas, hud, loading);
+  const el = h('div', { class: `screen game ${mode === 'record' ? 'record' : ''}` }, canvas, hud, loading);
 
   let session: GameSession | null = null;
   let pauseOverlay: HTMLElement | null = null;
@@ -139,6 +144,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         scrollWindow: settings.scrollWindow,
         drumSoundsOnHit: settings.drumSoundsOnHit,
         reducedMotion: settings.reducedMotion,
+        laneOrder: settings.laneOrder,
         loop: null,
       },
       {
@@ -168,7 +174,10 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         },
         onTick: (pos, dur) => {
           progressEl.style.width = `${Math.max(0, Math.min(100, (pos / dur) * 100))}%`;
-          if (mode === 'record' && session) scoreEl.textContent = String(session.recorded.length);
+          if (mode === 'record' && session) {
+            scoreEl.textContent = String(session.recorded.length);
+            wave?.draw(pos, session.beats, pkg.meta.offset, session.recorded.slice(-64).map((r) => ({ time: r.time, lane: LANE_FOR_VOICE[r.voice], color: VOICE_COLORS[r.voice] })));
+          }
         },
         onCountdown: (n) => {
           countdownEl.textContent = n === null ? '' : String(n);
@@ -178,12 +187,17 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       app.input,
     );
     (window as unknown as { dkSession: GameSession | null }).dkSession = session;
+    if (mode === 'record') {
+      wave = new WaveformStrip(waveCanvas, audio, { halfWindow: 5, accent: pkg.meta.accent ?? '#ff2d75' });
+      window.addEventListener('resize', onResizeWave);
+    }
     updateTiming();
     loading.remove();
     if (mode === 'practice') buildPracticeBar();
     await session.start(mode === 'record' ? studioState.countInBars * (60 / pkg.meta.bpm) * 4 : 3);
   }
 
+  const onResizeWave = () => wave?.resize();
   let inputOffset = settings.inputOffset;
   function updateTiming(): void {
     if (!session || mode === 'record') return;
@@ -343,6 +357,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     el,
     dispose: () => {
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onResizeWave);
       document.removeEventListener('visibilitychange', onVis);
       session?.stop();
     },

@@ -1,4 +1,4 @@
-import type { Chart, Difficulty, DrumVoice, InputHit, PerformanceNote, ScoreSummary, SongMeta } from '@/types';
+import type { Chart, Difficulty, DrumVoice, InputHit, Lane, PerformanceNote, ScoreSummary, SongMeta } from '@/types';
 import { Transport, ChartPlayer, Metronome } from '@/audio';
 import type { AudioEngine, DrumKit } from '@/audio';
 import { ticksToSeconds } from '@/midi';
@@ -26,6 +26,7 @@ export interface SessionConfig {
   scrollWindow: number;
   drumSoundsOnHit: boolean;
   reducedMotion: boolean;
+  laneOrder: Lane[];
   /** Loop region for practice (chart seconds). */
   loop?: { start: number; end: number } | null;
 }
@@ -78,6 +79,7 @@ export class GameSession {
     });
     this.renderer = new HighwayRenderer(canvas);
     this.renderer.setReducedMotion(cfg.reducedMotion);
+    this.renderer.setLaneOrder(cfg.laneOrder);
     this.beats = computeBeats(cfg.chart, this.audioDuration - cfg.meta.offset);
     this.judge.onEvent((ev) => this.handleJudge(ev));
     if (cfg.mode === 'practice' && cfg.guideDrums) {

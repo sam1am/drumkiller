@@ -88,6 +88,7 @@ export class HighwayRenderer {
   private nearW = 0;
   private farW = 0;
   private readonly K = 2.2; // perspective strength
+  private laneOrder: Lane[] = [...LANE_ORDER];
 
   constructor(private canvas: HTMLCanvasElement) {
     const ctx = canvas.getContext('2d', { alpha: false });
@@ -98,6 +99,11 @@ export class HighwayRenderer {
 
   setReducedMotion(on: boolean): void {
     this.reduced = on;
+  }
+
+  /** Left-to-right order of the vertical lanes. */
+  setLaneOrder(order: Lane[]): void {
+    this.laneOrder = [...order];
   }
 
   resize(): void {
@@ -129,8 +135,8 @@ export class HighwayRenderer {
     return 1 - (1 - this.farW / this.nearW) * this.u(z);
   }
   private laneCenterNear(lane: Lane): number {
-    const i = LANE_ORDER.indexOf(lane);
-    const laneW = this.nearW / LANE_ORDER.length;
+    const i = this.laneOrder.indexOf(lane);
+    const laneW = this.nearW / this.laneOrder.length;
     return this.cx - this.nearW / 2 + laneW * (i + 0.5);
   }
   private xAt(nearX: number, z: number): number {
@@ -246,8 +252,8 @@ export class HighwayRenderer {
     ctx.fillStyle = rg;
     ctx.fill();
     // lane stripes
-    const laneW = this.nearW / LANE_ORDER.length;
-    LANE_ORDER.forEach((lane, i) => {
+    const laneW = this.nearW / this.laneOrder.length;
+    this.laneOrder.forEach((lane, i) => {
       const x0 = this.cx - this.nearW / 2 + laneW * i;
       const x1 = x0 + laneW;
       ctx.beginPath();
@@ -261,7 +267,7 @@ export class HighwayRenderer {
     });
     // lane dividers
     ctx.lineWidth = 1;
-    for (let i = 0; i <= LANE_ORDER.length; i++) {
+    for (let i = 0; i <= this.laneOrder.length; i++) {
       const x = this.cx - this.nearW / 2 + laneW * i;
       const grad = ctx.createLinearGradient(0, this.strikeY, 0, this.farY);
       grad.addColorStop(0, 'rgba(255,255,255,0.28)');
@@ -308,7 +314,7 @@ export class HighwayRenderer {
 
   private drawReceptors(state: RenderState, now: number): void {
     const ctx = this.ctx;
-    const laneW = this.nearW / LANE_ORDER.length;
+    const laneW = this.nearW / this.laneOrder.length;
     // strike line
     const l = this.cx - this.nearW / 2;
     const r = this.cx + this.nearW / 2;
@@ -323,7 +329,7 @@ export class HighwayRenderer {
     ctx.shadowBlur = 0;
     // receptors
     this.flashes = this.flashes.filter((f) => now - f.t0 < 260);
-    LANE_ORDER.forEach((lane) => {
+    this.laneOrder.forEach((lane) => {
       const x = this.laneCenterNear(lane);
       const flash = this.flashes.filter((f) => f.lane === lane).pop();
       const flashAmt = flash ? 1 - (now - flash.t0) / 260 : 0;
@@ -406,7 +412,7 @@ export class HighwayRenderer {
     const lane = LANE_FOR_VOICE[voice];
     const scale = this.widthScaleAt(z);
     const y = this.yAt(z);
-    const laneW = (this.nearW / LANE_ORDER.length) * scale;
+    const laneW = (this.nearW / this.laneOrder.length) * scale;
     const color = missed ? '#6a6a7a' : VOICE_COLORS[voice];
     ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
     ctx.shadowColor = color;
@@ -416,7 +422,7 @@ export class HighwayRenderer {
       const lane0 = LANE_FOR_VOICE[voice];
       const nx = lane0 === 'crash' ? this.cx : this.laneCenterNear(lane0);
       const gx = this.xAt(nx, z);
-      const gw = lane0 === 'crash' ? (this.xAt(this.cx + this.nearW / 2, z) - this.xAt(this.cx - this.nearW / 2, z)) : (this.nearW / LANE_ORDER.length) * scale * 0.8;
+      const gw = lane0 === 'crash' ? (this.xAt(this.cx + this.nearW / 2, z) - this.xAt(this.cx - this.nearW / 2, z)) : (this.nearW / this.laneOrder.length) * scale * 0.8;
       ctx.strokeStyle = color;
       ctx.lineWidth = Math.max(1, 2 * scale);
       ctx.setLineDash([4 * scale, 4 * scale]);
@@ -444,8 +450,8 @@ export class HighwayRenderer {
     }
     let nearX = this.laneCenterNear(lane);
     // toms get three sub-positions within their lane
-    if (voice === 'tomHigh') nearX -= (this.nearW / LANE_ORDER.length) * 0.27;
-    if (voice === 'tomLow') nearX += (this.nearW / LANE_ORDER.length) * 0.27;
+    if (voice === 'tomHigh') nearX -= (this.nearW / this.laneOrder.length) * 0.27;
+    if (voice === 'tomLow') nearX += (this.nearW / this.laneOrder.length) * 0.27;
     const x = this.xAt(nearX, z);
     const rx = laneW * (voice === 'kick' ? 0.44 : voice.startsWith('tom') ? 0.2 : 0.3) * (0.85 + velocity * 0.2);
     const ry = rx * 0.45;
@@ -586,7 +592,7 @@ export class HighwayRenderer {
     ctx.font = '700 11px "Space Grotesk", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    LANE_ORDER.forEach((lane) => {
+    this.laneOrder.forEach((lane) => {
       const x = this.laneCenterNear(lane);
       ctx.fillStyle = hexA(LANE_COLORS[lane], 0.8);
       ctx.fillText(LANE_LABELS[lane], x, this.strikeY + 34);

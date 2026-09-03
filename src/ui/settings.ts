@@ -4,7 +4,8 @@ import { h, button, field, toast, clear, downloadBlob, pickFile } from './dom';
 import { topbar } from './topbar';
 import { VOICE_COLORS } from '@/game/renderer';
 import { hitWindowsFor } from '@/game/scoring';
-import { DIFFICULTIES } from '@/types';
+import { DIFFICULTIES, LANE_LABELS, type Lane } from '@/types';
+import { LANE_COLORS } from '@/game/renderer';
 import { Metronome, Transport } from '@/audio';
 
 export function settingsScreen(app: App): Screen {
@@ -27,6 +28,36 @@ export function settingsScreen(app: App): Screen {
     windowsTable.textContent = DIFFICULTIES.map((d) => { const w = hitWindowsFor(d, sc); return `${d}: ±${Math.round(w.perfect * 1000)} / ±${Math.round(w.great * 1000)} / ±${Math.round(w.good * 1000)} ms`; }).join('   ·   ');
   }
   renderWindows();
+
+  // lane order editor
+  const laneEditor = h('div', { class: 'lane-editor' });
+  function renderLanes(): void {
+    clear(laneEditor);
+    const order = app.settings.laneOrder;
+    order.forEach((lane, i) => {
+      const move = (dir: number) => {
+        const next = [...order];
+        const j = i + dir;
+        if (j < 0 || j >= next.length) return;
+        [next[i], next[j]] = [next[j], next[i]];
+        app.settingsStore.update({ laneOrder: next });
+        renderLanes();
+      };
+      laneEditor.appendChild(h('div', { class: 'lane-chip', style: { '--c': LANE_COLORS[lane] } },
+        button('◀', () => move(-1), 'icon ghost small'),
+        h('span', { class: 'lane-name' }, LANE_LABELS[lane]),
+        button('▶', () => move(1), 'icon ghost small'),
+      ));
+    });
+    laneEditor.appendChild(h('div', { class: 'small mute', style: { flexBasis: '100%', marginTop: '6px' } }, 'Crash always spans the full width. Presets:'));
+    const presets: [string, Lane[]][] = [
+      ['DRUM KIT (DEFAULT)', ['hihat', 'snare', 'kick', 'toms', 'ride']],
+      ['KICK FIRST', ['kick', 'hihat', 'snare', 'toms', 'ride']],
+      ['MIRRORED', ['ride', 'toms', 'kick', 'snare', 'hihat']],
+    ];
+    laneEditor.appendChild(h('div', { class: 'btn-row', style: { flexBasis: '100%' } }, ...presets.map(([label, o]) => button(label, () => { app.settingsStore.update({ laneOrder: o }); renderLanes(); }, 'icon small'))));
+  }
+  renderLanes();
 
   // keyboard binding editor
   const keys = h('div', { class: 'voice-list' });
@@ -153,7 +184,10 @@ export function settingsScreen(app: App): Screen {
         h(
           'div',
           { class: 'panel' },
-          h('h3', { style: { marginTop: 0 } }, 'Keyboard fallback'),
+          h('h3', { style: { marginTop: 0 } }, 'Highway lanes (left → right)'),
+          h('div', { class: 'small dim', style: { marginBottom: '10px' } }, 'Arrange the drums to match how your pads are laid out.'),
+          laneEditor,
+          h('h3', null, 'Keyboard fallback'),
           h('div', { class: 'small dim', style: { marginBottom: '10px' } }, 'No pads handy? Play with the keyboard. Click SET then press a key.'),
           keys,
           h('h3', null, 'Data'),

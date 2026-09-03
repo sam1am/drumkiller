@@ -267,6 +267,8 @@ export interface Settings {
   reducedMotion: boolean;
   /** Multiplier on the hit windows (1 = default, 2 = twice as forgiving). */
   hitWindowScale: number;
+  /** Left-to-right order of the five vertical lanes on the highway. */
+  laneOrder: Lane[];
   /** On hard/expert, require the exact drum voice (e.g. open vs closed hat, which tom). Off = any drum on the same lane counts. */
   strictVoices: boolean;
 }
@@ -294,5 +296,6 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: 'inferno',
   reducedMotion: false,
   hitWindowScale: 1.5,
+  laneOrder: [...LANE_ORDER],
   strictVoices: true,
 };
