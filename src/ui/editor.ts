@@ -21,9 +21,16 @@ interface EditNote {
 let ROW_H = 34; // recomputed on resize to fill the available height
 const RULER_H = 26;
 const LABEL_W = 110;
-const NOTE_W = 10;
+const NOTE_W = 12;
 const MIN_PPS = 20;
 const MAX_PPS = 600;
+/** Two notes on the same drum closer than this are the same note. */
+const SAME_SPOT = 0.002;
+/** Where the playhead sits (fraction of the visible timeline) while the chart scrolls past it. */
+const PLAYHEAD_FRAC = 0.25;
+
+/** Copied notes, times relative to the earliest one. Module-level so it survives re-opening the editor. */
+let clipboard: { dt: number; voice: DrumVoice; velocity: number }[] = [];
 
 function midiBytes(u8: Uint8Array): ArrayBuffer {
   const ab = new ArrayBuffer(u8.byteLength);
@@ -98,12 +105,14 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     } else {
       transport.play(Math.max(0, transport.position));
       player.start();
+      if (follow) pinPlayhead(chartTime());
     }
     updatePlayBtn();
   }
   function seekChart(t: number): void {
     transport.seek(Math.max(0, Math.min(audio.duration, t + pkg.meta.offset)));
     player.resync();
+    revealPlayhead(chartTime());
     draw();
   }
 
@@ -137,7 +146,33 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     updateStatus();
     draw();
   };
+  /** One note per drum per spot: later-added (higher id) or selected notes win over the note already there. */
+  const dedupe = (): void => {
+    const byVoice = new Map<DrumVoice, EditNote[]>();
+    for (const n of notes) {
+      const list = byVoice.get(n.voice);
+      if (list) list.push(n);
+      else byVoice.set(n.voice, [n]);
+    }
+    const drop = new Set<number>();
+    for (const list of byVoice.values()) {
+      list.sort((a, b) => a.time - b.time || a.id - b.id);
+      for (let i = 1; i < list.length; i++) {
+        const prev = list[i - 1];
+        const cur = list[i];
+        if (Math.abs(cur.time - prev.time) >= SAME_SPOT) continue;
+        // keep the selected one if only one is selected, else the newer one
+        const loser = selected.has(prev.id) && !selected.has(cur.id) ? cur : prev;
+        drop.add(loser.id);
+        if (loser === cur) list[i] = prev; // the survivor keeps competing with the next note
+      }
+    }
+    if (!drop.size) return;
+    notes = notes.filter((n) => !drop.has(n.id));
+    for (const id of drop) selected.delete(id);
+  };
   const commit = (): void => {
+    dedupe();
     notes.sort((a, b) => a.time - b.time);
     player.setNotes(notes);
     updateStatus();
@@ -154,6 +189,20 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   const xOf = (t: number) => LABEL_W + (t - scrollT) * pps;
   const tOf = (x: number) => scrollT + (x - LABEL_W) / pps;
   const yOf = (voice: DrumVoice) => RULER_H + rowOf(voice) * ROW_H;
+  const visibleSeconds = () => (W - LABEL_W) / pps;
+  /** Scroll so the playhead sits at PLAYHEAD_FRAC of the timeline. */
+  const pinPlayhead = (t: number): void => {
+    scrollT = t - visibleSeconds() * PLAYHEAD_FRAC;
+  };
+  /** Bring an off-screen playhead back into view (pinned). */
+  const revealPlayhead = (t: number): void => {
+    const x = xOf(t);
+    if (x < LABEL_W || x > W) pinPlayhead(t);
+  };
+  const setFollow = (on: boolean): void => {
+    follow = on;
+    followBtn.textContent = `FOLLOW: ${follow ? 'ON' : 'OFF'}`;
+  };
 
   function resize(): void {
     const dpr = Math.min(2, devicePixelRatio || 1);
@@ -172,10 +221,8 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   function draw(): void {
     if (!base) return;
     const t = chartTime();
-    if (follow && transport.playing) {
-      const visible = (W - LABEL_W) / pps;
-      if (t < scrollT || t > scrollT + visible * 0.85) scrollT = Math.max(-1, t - visible * 0.2);
-    }
+    // While playing with FOLLOW on, the playhead stays pinned and the chart scrolls past it.
+    if (follow && transport.playing) pinPlayhead(t);
     ctx.fillStyle = '#08080c';
     ctx.fillRect(0, 0, W, H);
     const t0 = tOf(LABEL_W);
@@ -252,7 +299,10 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
       const hgt = 8 + n.velocity * (ROW_H - 12);
       const color = VOICE_COLORS[n.voice];
       ctx.fillStyle = color;
-      ctx.globalAlpha = 0.35 + n.velocity * 0.65;
+      // full-height column marks the whole click target; the solid bar shows velocity
+      ctx.globalAlpha = 0.18;
+      ctx.fillRect(x - NOTE_W / 2, y + 2, NOTE_W, ROW_H - 4);
+      ctx.globalAlpha = 0.45 + n.velocity * 0.55;
       ctx.fillRect(x - NOTE_W / 2, y + ROW_H - 2 - hgt, NOTE_W, hgt);
       ctx.globalAlpha = 1;
       if (selected.has(n.id)) {
@@ -318,21 +368,31 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   let drag: Drag | null = null;
   let hoverRow = -1;
 
+  /** Pixel tolerance for picking a note: at least the note width, up to half a grid step when zoomed in. */
+  const hitRadius = (): number => {
+    const step = gridStepTicks(grid, base.ppq) || base.ppq / 4;
+    const stepPx = (ticksToSeconds(step, base.tempoMap, base.ppq) - ticksToSeconds(0, base.tempoMap, base.ppq)) * pps;
+    return Math.max(NOTE_W / 2 + 4, Math.min(16, stepPx / 2));
+  };
+  /** Nearest note on the row under `y` within reach of `x`; the whole row height counts regardless of velocity. */
   const noteAt = (x: number, y: number): EditNote | null => {
-    const row = Math.floor((y - RULER_H) / ROW_H);
-    if (row < 0 || row >= rows.length) return null;
+    const voice = rowVoice(y);
+    if (!voice) return null;
+    const r = hitRadius();
     let best: EditNote | null = null;
     let bestD = Infinity;
     for (const n of notes) {
-      if (n.voice !== rows[row]) continue;
+      if (n.voice !== voice) continue;
       const d = Math.abs(xOf(n.time) - x);
-      if (d <= NOTE_W / 2 + 3 && d < bestD) {
+      if (d <= r && d < bestD) {
         best = n;
         bestD = d;
       }
     }
     return best;
   };
+  const noteAtTime = (voice: DrumVoice, t: number): EditNote | null =>
+    notes.find((n) => n.voice === voice && Math.abs(n.time - t) < SAME_SPOT) ?? null;
 
   const rowVoice = (y: number): DrumVoice | null => {
     const row = Math.floor((y - RULER_H) / ROW_H);
@@ -395,6 +455,15 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     const voice = rowVoice(y);
     if (!voice) return;
     const t = Math.max(0, snapTime(tOf(x)));
+    const existing = noteAtTime(voice, t);
+    if (existing) {
+      // the snapped spot is already taken — select that note rather than stacking another on it
+      selected.clear();
+      selected.add(existing.id);
+      app.kit.trigger(existing.voice, existing.velocity);
+      draw();
+      return;
+    }
     pushUndo();
     const n: EditNote = { id: nextId++, time: t, voice, velocity: velocityForNew };
     notes.push(n);
@@ -462,15 +531,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
         }
       }
     } else if (drag.kind === 'move' && drag.moved) {
-      // Remove exact duplicates created by dragging onto another note.
-      const seen = new Set<string>();
-      notes = notes.filter((n) => {
-        const key = `${n.voice}@${n.time.toFixed(4)}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-      commit();
+      commit(); // dedupes notes dragged onto another note
     }
     drag = null;
     draw();
@@ -488,7 +549,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
       scrollT += (e.deltaX || e.deltaY) / pps;
     }
     scrollT = Math.max(-1, Math.min(chartDuration, scrollT));
-    follow = false;
+    if (transport.playing) setFollow(false);
     draw();
   }
 
@@ -516,6 +577,15 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     } else if (meta && e.code === 'KeyD') {
       e.preventDefault();
       duplicateSelected();
+    } else if (meta && e.code === 'KeyC') {
+      e.preventDefault();
+      copySelected();
+    } else if (meta && e.code === 'KeyX') {
+      e.preventDefault();
+      if (copySelected()) deleteSelected();
+    } else if (meta && e.code === 'KeyV') {
+      e.preventDefault();
+      pasteAtPlayhead();
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       e.preventDefault();
       if (selected.size) nudge(e.code === 'ArrowLeft' ? -1 : 1, 0);
@@ -567,6 +637,26 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     copies.forEach((c) => selected.add(c.id));
     commit();
   }
+  /** Copy the selection to the editor clipboard (times relative to the earliest copied note). */
+  function copySelected(): boolean {
+    const sel = notes.filter((n) => selected.has(n.id));
+    if (!sel.length) return false;
+    const t0 = Math.min(...sel.map((n) => n.time));
+    clipboard = sel.map((n) => ({ dt: n.time - t0, voice: n.voice, velocity: n.velocity }));
+    toast(`Copied ${sel.length} note${sel.length === 1 ? '' : 's'}`, 'ok');
+    return true;
+  }
+  /** Paste the clipboard with its first note at the (snapped) playhead; pasted notes become the selection. */
+  function pasteAtPlayhead(): void {
+    if (!clipboard.length) return;
+    pushUndo();
+    const t0 = Math.max(0, snapTime(chartTime()));
+    const pasted = clipboard.map((c) => ({ id: nextId++, time: t0 + c.dt, voice: c.voice, velocity: c.velocity }));
+    notes.push(...pasted);
+    selected.clear();
+    pasted.forEach((n) => selected.add(n.id));
+    commit();
+  }
   function setSelectedVelocity(v: number): void {
     if (!selected.size) return;
     pushUndo();
@@ -583,7 +673,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     if (!padInput) return;
     const pos = transport.positionAtPerfTime(hit.timeStamp) - pkg.meta.offset + app.settings.inputOffset - app.engine.inputLatencyCompensation;
     const t = Math.max(0, snapTime(pos));
-    if (notes.some((n) => n.voice === hit.voice && Math.abs(n.time - t) < 0.001)) return;
+    if (noteAtTime(hit.voice, t)) return;
     pushUndo();
     notes.push({ id: nextId++, time: t, voice: hit.voice, velocity: hit.velocity });
     commit();
@@ -642,7 +732,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     draw();
   });
   const gridSel = select(QUANTIZE_GRIDS.map((g) => ({ value: g.id, label: g.id === 'off' ? 'Snap: off' : `Snap: ${g.label}` })), grid, (v) => { grid = v as QuantizeGrid; draw(); });
-  const followBtn = button('FOLLOW: ON', () => { follow = !follow; followBtn.textContent = `FOLLOW: ${follow ? 'ON' : 'OFF'}`; }, 'icon small');
+  const followBtn = button('FOLLOW: ON', () => { setFollow(!follow); if (follow) { pinPlayhead(chartTime()); draw(); } }, 'icon small');
   const padBtn = button('PADS ADD NOTES: ON', () => { padInput = !padInput; padBtn.textContent = `PADS ADD NOTES: ${padInput ? 'ON' : 'OFF'}`; }, 'icon small');
 
   const toolbar = h('div', { class: 'editor-toolbar' },
@@ -655,6 +745,8 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     button('REDO', () => restore(redo, undo), 'icon small'),
     button('DELETE', deleteSelected, 'icon small'),
     button('DUPLICATE', duplicateSelected, 'icon small'),
+    button('COPY', copySelected, 'icon small'),
+    button('PASTE', pasteAtPlayhead, 'icon small'),
     button('−', () => { pps = Math.max(MIN_PPS, pps * 0.8); draw(); }, 'icon small'),
     button('+', () => { pps = Math.min(MAX_PPS, pps * 1.25); draw(); }, 'icon small'),
     followBtn,
@@ -670,7 +762,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   );
   const help = h('div', { class: 'small mute editor-help' },
     'Click empty space = add note · drag = move (rows change the drum) · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
-    h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing',
+    h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing',
   );
 
   const el = h('div', { class: 'screen' },
@@ -694,7 +786,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   };
   tick();
   app.input.keyboard.setEnabled(false); // editor owns the keyboard
-  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get selected() { return selected; }, toChart, save, transport, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; } };
+  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get selected() { return selected; }, toChart, save, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; } };
 
   return {
     el,

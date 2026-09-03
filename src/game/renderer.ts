@@ -7,7 +7,7 @@ export const LANE_COLORS: Record<Lane, string> = {
   kick: '#ff7a1a',
   toms: '#4d8dff',
   ride: '#8dff5a',
-  crash: '#fff6c8',
+  crash: '#2b8cff',
 };
 
 export const VOICE_COLORS: Record<DrumVoice, string> = {
@@ -19,7 +19,7 @@ export const VOICE_COLORS: Record<DrumVoice, string> = {
   hihatClosed: '#ffe600',
   hihatOpen: '#fff7a8',
   ride: '#8dff5a',
-  crash: '#fff6c8',
+  crash: '#2b8cff',
 };
 
 const JUDGE_COLORS: Record<Judgement, string> = { perfect: '#ffe600', great: '#8dff5a', good: '#3ef2ff', miss: '#ff3b3b' };
@@ -433,18 +433,34 @@ export class HighwayRenderer {
       return;
     }
     if (lane === 'crash') {
+      // Full-width glowing bar: a wide soft halo, a solid gradient body and a white-hot core line,
+      // so it reads as a note and never as a measure line.
       const l = this.xAt(this.cx - this.nearW / 2, z);
       const r = this.xAt(this.cx + this.nearW / 2, z);
-      const hh = Math.max(3, 7 * scale);
+      const hh = Math.max(6, 16 * scale);
+      const halo = hh * 1.6;
+      ctx.shadowBlur = missed ? 0 : 32 * scale;
+      ctx.fillStyle = hexA(color, missed ? 0.15 : 0.35);
+      ctx.fillRect(l, y - halo, r - l, halo * 2);
+      ctx.shadowBlur = missed ? 0 : 18 * scale;
       const g = ctx.createLinearGradient(l, 0, r, 0);
-      g.addColorStop(0, hexA(color, 0.2));
+      g.addColorStop(0, hexA(color, 0.55));
       g.addColorStop(0.5, color);
-      g.addColorStop(1, hexA(color, 0.2));
+      g.addColorStop(1, hexA(color, 0.55));
       ctx.fillStyle = g;
       ctx.fillRect(l, y - hh / 2, r - l, hh);
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(l + (r - l) * 0.35, y - hh / 4, (r - l) * 0.3, hh / 2);
       ctx.shadowBlur = 0;
+      if (!missed) {
+        const core = ctx.createLinearGradient(l, 0, r, 0);
+        core.addColorStop(0, 'rgba(255,255,255,0.25)');
+        core.addColorStop(0.5, 'rgba(255,255,255,0.95)');
+        core.addColorStop(1, 'rgba(255,255,255,0.25)');
+        ctx.fillStyle = core;
+        ctx.fillRect(l, y - hh * 0.16, r - l, hh * 0.32);
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth = Math.max(1, 1.5 * scale);
+        ctx.strokeRect(l, y - hh / 2, r - l, hh);
+      }
       ctx.globalAlpha = 1;
       return;
     }
