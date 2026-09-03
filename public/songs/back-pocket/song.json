@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "id": "back-pocket",
+  "title": "Back Pocket",
+  "artist": "DRUMKILLER",
+  "charter": "make-demo-song",
+  "genre": "Funk",
+  "year": 2026,
+  "bpm": 96,
+  "offset": 1,
+  "audio": "audio.m4a",
+  "charts": {
+    "expert": "expert.mid"
+  },
+  "preview": {
+    "start": 21,
+    "length": 20
+  },
+  "accent": "#ffb02f",
+  "length": 79
+}

@@ -1,0 +1,21 @@
+{
+  "format": 1,
+  "id": "neon-overdrive",
+  "title": "Neon Overdrive",
+  "artist": "DRUMKILLER",
+  "charter": "make-demo-song",
+  "genre": "Synthwave",
+  "year": 2026,
+  "bpm": 128,
+  "offset": 1,
+  "audio": "audio.m4a",
+  "charts": {
+    "expert": "expert.mid"
+  },
+  "preview": {
+    "start": 46,
+    "length": 20
+  },
+  "accent": "#ff2fb3",
+  "length": 112.75
+}
