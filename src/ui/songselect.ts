@@ -4,6 +4,7 @@ import { loadSongFromZip, loadSongFromFiles, availableDifficulties } from '@/son
 import { h, button, toast, pickFile, pickFolder, clear, fmtScore, fmtTime } from './dom';
 import { topbar } from './topbar';
 import { drawProceduralArt } from './artwork';
+import { applySongKit } from './game';
 import { starString } from '@/game/scoring';
 import { Transport } from '@/audio';
 
@@ -62,6 +63,8 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
       await app.boot();
       const pkg = await app.library.load(e);
       if (token !== previewToken) return;
+      // Pads audition the selected song's kit (custom samples or the default kit).
+      applySongKit(app, pkg).catch((err) => console.warn('kit load failed', err));
       const audioBlob = pkg.files.get(pkg.meta.audio);
       if (!audioBlob) return;
       const buf = await app.engine.decode(await audioBlob.arrayBuffer());
@@ -83,6 +86,19 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
   function stopPreview(): void {
     previewTransport?.stop();
     previewTransport = null;
+  }
+
+  /** Load the song's kit without starting the audio preview (auto-select on screen open). */
+  async function loadKit(e: SongListEntry): Promise<void> {
+    if (!app.booted) return; // pads can't fire before boot; play/preview loads the kit later
+    const token = ++previewToken;
+    try {
+      const pkg = await app.library.load(e);
+      if (token !== previewToken) return;
+      await applySongKit(app, pkg);
+    } catch (err) {
+      console.warn('kit load failed', err);
+    }
   }
 
   function renderDetail(): void {
@@ -211,6 +227,11 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
   window.addEventListener('dragleave', onDragLeave);
   window.addEventListener('drop', onDrop);
 
+  // Hitting a pad plays the selected song's kit so you can try the samples before playing.
+  const unsubHits = app.input.onHit((hit) => {
+    if (app.settings.drumSoundsOnHit) app.kit.trigger(hit.voice, hit.velocity);
+  });
+
   const el = h(
     'div',
     { class: 'screen' },
@@ -227,6 +248,7 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
         selected = e;
         card.classList.add('selected');
         renderDetail();
+        loadKit(e);
       }
     }
   });
@@ -235,6 +257,7 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
     dispose: () => {
       stopPreview();
       previewToken++;
+      unsubHits();
       window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('dragleave', onDragLeave);
       window.removeEventListener('drop', onDrop);

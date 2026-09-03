@@ -44,6 +44,11 @@ export class App {
     return this.settingsStore.get();
   }
 
+  /** True once boot() has initialised audio (i.e. a user gesture has happened). */
+  get booted(): boolean {
+    return this.audioReady;
+  }
+
   private applySettings(s: Settings): void {
     this.input.keyboard.setBindings(s.keyboard);
     document.body.classList.toggle('reduced-motion', s.reducedMotion);
