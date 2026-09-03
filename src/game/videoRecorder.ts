@@ -1,9 +1,10 @@
 /**
  * VideoRecorder — records a play/practice session as a single WebM in the browser.
  *
- * Composites, every frame, into an offscreen 16:9 canvas:
- *   1. the highway canvas (letterboxed),
- *   2. the webcam (picture-in-picture bottom-left, or a full-height left column),
+ * Composites, every frame, into an offscreen 16:9 canvas, side by side:
+ *   1. the webcam in a full-height portrait column on the left (CAM_FRACTION of the width),
+ *   2. the highway canvas centred in the remaining area (cropped to fill; letterboxed if that would
+ *      cut too much away),
  *   3. a repaint of the HUD (score, combo, judgements, song info…) — the real HUD is DOM, so it
  *      would be missing from a plain canvas capture.
  *
@@ -12,7 +13,12 @@
  * No server, no ffmpeg: the finished Blob is offered for download on the results screen.
  */
 
-import type { CamLayout } from '@/types';
+/** Width of the camera column as a fraction of the video width. */
+export const CAM_FRACTION = 0.3;
+/** Aspect ratio (w/h) of the camera column — the HUD preview uses the same crop. */
+export const CAM_ASPECT = (CAM_FRACTION * 16) / 9;
+/** Crop at most this fraction of the highway's width/height to fill the game area; letterbox beyond that. */
+const MAX_CROP = 0.35;
 
 export interface HudSnapshot {
   score: string;
@@ -46,7 +52,6 @@ export interface VideoRecorderOptions {
   /** Output height (16:9). */
   height: number;
   fps?: number;
-  layout: CamLayout;
   accent?: string;
   hud: () => HudSnapshot;
 }
@@ -182,26 +187,35 @@ export class VideoRecorder {
     this.drawHud(now);
   }
 
+  /** The game area: everything right of the camera column. */
+  private gameRect(): { x: number; y: number; w: number; h: number } {
+    const cam = this.camRect();
+    return { x: cam.w, y: 0, w: this.width - cam.w, h: this.height };
+  }
+
   private drawHighway(): void {
-    const { ctx, width: W, height: H } = this;
+    const { ctx } = this;
     const src = this.opts.highway;
     if (!src.width || !src.height) return;
-    // Letterbox — never crop lanes away.
-    const scale = Math.min(W / src.width, H / src.height);
-    const w = Math.round(src.width * scale);
-    const h = Math.round(src.height * scale);
-    ctx.drawImage(src, Math.round((W - w) / 2), Math.round((H - h) / 2), w, h);
+    const r = this.gameRect();
+    // Fill the game area, cropping the highway's edges symmetrically so the road stays centred;
+    // if that would crop more than MAX_CROP, letterbox instead so lanes are never lost.
+    const cover = Math.max(r.w / src.width, r.h / src.height);
+    const contain = Math.min(r.w / src.width, r.h / src.height);
+    const cropped = 1 - contain / cover; // fraction of the larger axis that cover would discard
+    const scale = cropped <= MAX_CROP ? cover : contain;
+    const w = src.width * scale;
+    const h = src.height * scale;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    ctx.drawImage(src, r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h);
+    ctx.restore();
   }
 
   private camRect(): { x: number; y: number; w: number; h: number } {
-    const { width: W, height: H } = this;
-    if (this.opts.layout === 'column') return { x: 0, y: 0, w: Math.round(W * 0.3), h: H };
-    const vw = this.video?.videoWidth || 16;
-    const vh = this.video?.videoHeight || 9;
-    const w = Math.round(W * 0.3);
-    const h = Math.min(Math.round(H * 0.5), Math.round((w * vh) / vw));
-    const pad = Math.round(H * 0.025);
-    return { x: pad, y: H - h - pad, w, h };
+    return { x: 0, y: 0, w: Math.round(this.width * CAM_FRACTION), h: this.height };
   }
 
   private drawCamera(): void {
@@ -209,9 +223,9 @@ export class VideoRecorder {
     if (!v || v.readyState < 2 || !v.videoWidth) return;
     const { ctx } = this;
     const r = this.camRect();
-    const radius = this.opts.layout === 'column' ? 0 : Math.round(this.height * 0.012);
     ctx.save();
-    roundRect(ctx, r.x, r.y, r.w, r.h, radius);
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
     ctx.clip();
     // Cover-crop the camera into the rect.
     const scale = Math.max(r.w / v.videoWidth, r.h / v.videoHeight);
@@ -219,19 +233,9 @@ export class VideoRecorder {
     const h = v.videoHeight * scale;
     ctx.drawImage(v, r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h);
     ctx.restore();
-    if (this.opts.layout === 'pip') {
-      ctx.save();
-      roundRect(ctx, r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1, radius);
-      ctx.lineWidth = Math.max(2, this.height / 360);
-      ctx.strokeStyle = this.opts.accent ?? '#ff2d75';
-      ctx.shadowColor = ctx.strokeStyle;
-      ctx.shadowBlur = this.height / 45;
-      ctx.stroke();
-      ctx.restore();
-    } else {
-      ctx.fillStyle = 'rgba(255,255,255,0.12)';
-      ctx.fillRect(r.x + r.w - 1, r.y, 1, r.h);
-    }
+    // Divider between the camera column and the game.
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(r.x + r.w - 1, r.y, 1, r.h);
   }
 
   private drawHud(now: number): void {
@@ -242,7 +246,7 @@ export class VideoRecorder {
     const body = (px: number, weight = 700) => `${weight} ${px * u}px "Space Grotesk", system-ui, sans-serif`;
     const mono = (px: number) => `700 ${px * u}px "JetBrains Mono", monospace`;
     const accent = this.opts.accent ?? '#ff2d75';
-    const camLeft = this.opts.layout === 'column' ? this.camRect().w : 0;
+    const camLeft = this.camRect().w;
     const left = camLeft + 24 * u;
 
     // progress bar
@@ -408,18 +412,4 @@ export class VideoRecorder {
       this.video.remove();
     }
   }
-}
-
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  ctx.beginPath();
-  if (r <= 0) {
-    ctx.rect(x, y, w, h);
-    return;
-  }
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
 }

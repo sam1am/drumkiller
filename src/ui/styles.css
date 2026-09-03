@@ -250,9 +250,8 @@ body.dragover::after { content: 'DROP SONG ZIP TO IMPORT'; position: fixed; inse
 @keyframes blink { 50% { opacity: .2; } }
 .hud .countdown { position: absolute; inset: 0; display: grid; place-items: center; font-family: var(--font-display); font-size: 160px; color: #fff; text-shadow: 0 0 40px var(--accent); }
 .hud .flash { position: absolute; inset: 0; background: #fff; opacity: 0; }
-/* live webcam preview while recording a performance video — roughly where it lands in the output */
-.hud .cam-preview { position: absolute; left: 28px; bottom: 64px; width: 20%; max-width: 320px; aspect-ratio: 16/9; object-fit: cover; border-radius: 10px; border: 2px solid var(--accent); box-shadow: 0 0 20px color-mix(in oklab, var(--accent) 50%, transparent); background: #000; opacity: .9; }
-.hud .cam-preview.column { left: 0; top: 0; bottom: 0; width: 18%; max-width: none; aspect-ratio: auto; border-radius: 0; border: none; border-right: 1px solid var(--line); opacity: .8; }
+/* live webcam preview while recording a performance video — same portrait crop as the camera column in the output */
+.hud .cam-preview { position: absolute; left: 28px; bottom: 64px; height: 42%; aspect-ratio: var(--cam-aspect, 8 / 15); object-fit: cover; border-radius: 10px; border: 2px solid var(--accent); box-shadow: 0 0 20px color-mix(in oklab, var(--accent) 50%, transparent); background: #000; opacity: .9; }
 .pause-overlay { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; background: rgba(5,5,10,.82); backdrop-filter: blur(8px); }
 .pause-overlay .menu { align-items: stretch; }
 .pause-overlay h2 { text-align: center; }

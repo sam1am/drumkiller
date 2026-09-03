@@ -195,11 +195,10 @@ export function settingsScreen(app: App): Screen {
   });
   const videoPanel = videoRecordingSupported()
     ? [
-        h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordVideo, onChange: (e: Event) => app.settingsStore.update({ recordVideo: (e.target as HTMLInputElement).checked }) }), 'Record my performances (webcam + game screen) — the video is offered on the results screen'),
+        h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordVideo, onChange: (e: Event) => app.settingsStore.update({ recordVideo: (e.target as HTMLInputElement).checked }) }), 'Record my performances — you on the left, the highway on the right, side by side; the video is offered on the results screen'),
         h('div', { class: 'small mute', style: { margin: '6px 0 12px' } }, 'Recorded in the browser as WebM; nothing is uploaded. Play and practice modes only. Costs some CPU — use 720p on laptops.'),
         field('Camera', h('div', { class: 'row' }, camSelect, button('DETECT', () => listCameras(true), 'icon small'), testBtn)),
         camTest,
-        field('Camera position', select([{ value: 'pip', label: 'Small window, bottom-left' }, { value: 'column', label: 'Full-height column on the left' }], s.recordCamLayout, (v) => app.settingsStore.update({ recordCamLayout: v as 'pip' | 'column' }))),
         field('Video size', select([{ value: '720', label: '1280 × 720 (recommended)' }, { value: '1080', label: '1920 × 1080' }], String(s.recordResolution), (v) => app.settingsStore.update({ recordResolution: Number(v) as 720 | 1080 }))),
         h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordMic, onChange: (e: Event) => app.settingsStore.update({ recordMic: (e.target as HTMLInputElement).checked }) }), 'Also record the microphone (raw — picks up your pads, and whatever your speakers play)'),
       ]

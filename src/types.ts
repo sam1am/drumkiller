@@ -277,14 +277,10 @@ export interface Settings {
   recordCameraId?: string;
   /** Mix the webcam's microphone into the recording (raw, no voice processing). */
   recordMic: boolean;
-  /** Where the webcam goes in the recorded video. */
-  recordCamLayout: CamLayout;
   /** Output height in pixels (16:9). */
   recordResolution: RecordResolution;
 }
 
-export type CamLayout = 'pip' | 'column';
-export const CAM_LAYOUTS: CamLayout[] = ['pip', 'column'];
 export type RecordResolution = 720 | 1080;
 export const RECORD_RESOLUTIONS: RecordResolution[] = [720, 1080];
 
@@ -315,6 +311,5 @@ export const DEFAULT_SETTINGS: Settings = {
   strictVoices: true,
   recordVideo: false,
   recordMic: false,
-  recordCamLayout: 'pip',
   recordResolution: 720,
 };

@@ -103,7 +103,7 @@ try {
   assert((await evaluate(`location.hash`)) === '#songs', 'quit returns to song list');
 
   // ── performance video recording (fake webcam) ──
-  await evaluate(`window.dk.settingsStore.update({ recordVideo: true, recordResolution: 720, recordCamLayout: 'pip' })`);
+  await evaluate(`window.dk.settingsStore.update({ recordVideo: true, recordResolution: 720 })`);
   await evaluate(`Array.from(document.querySelectorAll('.songcard')).find(c => c.textContent.includes('Back Pocket')).click()`);
   await sleep(600);
   await evaluate(`document.querySelector('.diff[data-d=medium]').click()`);

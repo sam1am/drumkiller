@@ -6,7 +6,7 @@ import { VOICE_COLORS } from '@/game/renderer';
 import { chartFromMidi, deriveDifficulty, parseMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
 import { getChartBlob, hardestAvailable } from '@/song';
 import { GameSession, type GameMode } from '@/game/session';
-import { VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot } from '@/game/videoRecorder';
+import { CAM_ASPECT, VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot } from '@/game/videoRecorder';
 import { starString } from '@/game/scoring';
 import { h, button, toast, fmtScore, clear } from './dom';
 import { studioState } from './studioState';
@@ -153,13 +153,13 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         audioContext: app.engine.ctx,
         captureNode: app.engine.captureNode,
         height: settings.recordResolution,
-        layout: settings.recordCamLayout,
         accent: pkg.meta.accent,
         hud: hudSnapshot,
       });
       const cam = recorder.cameraElement;
       if (cam) {
-        cam.className = `cam-preview ${settings.recordCamLayout}`;
+        cam.className = 'cam-preview';
+        cam.style.setProperty('--cam-aspect', String(CAM_ASPECT));
         hud.appendChild(cam);
       }
       modeTag.appendChild(h('span', { class: 'pill bad' }, h('span', { class: 'rec-dot' }), 'REC'));

@@ -24,7 +24,7 @@ Use **Chrome or Edge** (Web MIDI). Firefox 108+ also works. Safari has no Web MI
 - **Pad Setup wizard**: walks through kick, snare, toms, hats, ride, crash and asks you to hit the pad(s) for each. Saved per MIDI device. Presets for FGDP-30/50, generic 4×4 pads (MPD/MPK/Launchpad/…), and General MIDI.
 - **Built-in drum kit**: synthesized at startup (no downloads); any song can override any drum with its own samples.
 - **Latency calibration** in Settings, plus a keyboard fallback so you can play with no hardware.
-- **Performance video**: turn on *Record my performances* in Settings and every play/practice take is recorded in the browser — your webcam overlaid on the game screen (small window bottom-left or a full-height left column), the live HUD, and the game audio (optionally your mic). The results screen shows the video with a **SAVE VIDEO** button. It is plain WebM from `MediaRecorder`, so nothing leaves your machine and the site stays static. 720p is the default; 1080p costs more CPU.
+- **Performance video**: turn on *Record my performances* in Settings and every play/practice take is recorded in the browser — you on the left and the highway on the right, side by side, with the live HUD, and the game audio (optionally your mic). The results screen shows the video with a **SAVE VIDEO** button. It is plain WebM from `MediaRecorder`, so nothing leaves your machine and the site stays static. 720p is the default; 1080p costs more CPU.
 
 ## Chart editor
 
