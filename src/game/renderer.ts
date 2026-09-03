@@ -311,8 +311,9 @@ export class HighwayRenderer {
     ctx.lineTo(left(zFar), this.yAt(zFar));
     ctx.closePath();
     const rg = ctx.createLinearGradient(0, this.farY, 0, this.strikeY);
-    rg.addColorStop(0, 'rgba(20,18,30,0.2)');
-    rg.addColorStop(1, 'rgba(26,22,40,0.95)');
+    // Mostly opaque so the background visualiser stays behind the road rather than blending into it.
+    rg.addColorStop(0, 'rgba(16,14,24,0.82)');
+    rg.addColorStop(1, 'rgba(22,19,34,0.97)');
     ctx.fillStyle = rg;
     ctx.fill();
     // lane stripes
@@ -683,9 +684,10 @@ export class HighwayRenderer {
     const ctx = this.ctx;
     const cy = this.h * 0.5;
     const cx = this.cx;
-    const R = Math.min(this.w, this.h) * 0.5; // outer reach: most of the background
     const bass = this.bassLevel;
     const energy = this.energy;
+    // Outer reach: most of the background, and it swells with the mix — loud passages push it toward the edges.
+    const R = Math.hypot(this.w, this.h) * 0.3 * (0.7 + energy * 0.9 + bass * 0.35);
     const accent2 = hexRotate(accent, 48);
     const accent3 = hexRotate(accent, -36);
     if (!this.reduced) this.spin += dt * (0.08 + bass * 0.5);
@@ -715,7 +717,7 @@ export class HighwayRenderer {
     }
 
     // ── sunburst: two mirrored spectrum layers ──
-    const inner = R * (0.2 + bass * 0.06 + energy * 0.04);
+    const inner = R * (0.22 + bass * 0.06 + energy * 0.04);
     const burst = (rot: number, color: string, gain: number, alpha: number, squash: number) => {
       ctx.beginPath();
       const n = cols;
@@ -723,7 +725,7 @@ export class HighwayRenderer {
       const pt = (i: number, side: 1 | -1) => {
         const idx = Math.max(0, Math.min(n - 1, i));
         const v = (this.spectrum[Math.max(0, idx - 1)] + this.spectrum[idx] * 2 + this.spectrum[Math.min(n - 1, idx + 1)]) / 4;
-        const len = inner + Math.pow(v, 1.5) * (R - inner) * gain;
+        const len = inner + Math.pow(v, 1.3) * (R - inner) * gain;
         const ang = -Math.PI / 2 + ((idx + 0.5) / n) * Math.PI;
         const a = side === 1 ? ang : Math.PI - ang;
         const x = Math.cos(a + rot) * len;
@@ -767,7 +769,7 @@ export class HighwayRenderer {
     for (let i = 0; i < cols; i += 2) {
       const v = this.spectrum[i];
       if (v < 0.08) continue;
-      const len = inner + Math.pow(v, 1.5) * (R - inner);
+      const len = inner + Math.pow(v, 1.3) * (R - inner);
       const ang = -Math.PI / 2 + ((i + 0.5) / cols) * Math.PI;
       ctx.strokeStyle = hexA(accent, 0.05 + v * 0.22);
       for (const a of [ang, Math.PI - ang]) {
