@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DRUMKILLER — the finger-drumming rhythm game for MIDI pads</title>
+  <meta name="description" content="A free browser rhythm game for finger drummers. Plug in a 4×4 pad controller or Yamaha FGDP-30/50, hit the notes on a neon highway, chase high scores, and turn your own performances into shareable song charts." />
+  <meta property="og:title" content="DRUMKILLER" />
+  <meta property="og:description" content="Guitar Hero for finger drumming. Runs in your browser with any MIDI pad controller." />
+  <meta property="og:image" content="assets/gameplay.jpg" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23ff2d75'/%3E%3Ccircle cx='32' cy='32' r='16' fill='%230b0b10'/%3E%3Ccircle cx='32' cy='32' r='6' fill='%23ffe600'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Bungee&family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0b0b10; --bg-2: #14121c; --bg-3: #1d1928; --ink: #f4f0ff; --dim: #a99fc0; --mute: #6c6484;
+      --line: rgba(255,255,255,.08); --pink: #ff2d75; --yellow: #ffe600; --orange: #ff7a1a; --cyan: #3ef2ff; --blue: #4d8dff; --violet: #9d6bff; --lime: #8dff5a;
+      --display: 'Bungee', Impact, 'Arial Black', sans-serif; --body: 'Space Grotesk', system-ui, sans-serif; --mono: 'JetBrains Mono', ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--body); line-height: 1.5; overflow-x: hidden; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; }
+    .wrap { width: min(1120px, 92vw); margin: 0 auto; }
+
+    /* backdrop */
+    .sky { position: fixed; inset: 0; z-index: -1; overflow: hidden;
+      background: radial-gradient(1200px 600px at 50% 110%, rgba(255,45,117,.35), transparent 60%), radial-gradient(800px 500px at 10% -10%, rgba(77,141,255,.25), transparent 60%), radial-gradient(700px 400px at 95% 10%, rgba(255,230,0,.14), transparent 60%), var(--bg); }
+    .sky::before { content: ''; position: absolute; inset: -50%;
+      background-image: linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px);
+      background-size: 48px 48px; transform: perspective(600px) rotateX(60deg) translateY(10%); transform-origin: 50% 100%;
+      animation: flow 6s linear infinite; mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent 70%); }
+    @keyframes flow { to { background-position: 0 96px; } }
+    @media (prefers-reduced-motion: reduce) { .sky::before { animation: none; } }
+
+    /* nav */
+    nav { display: flex; align-items: center; gap: 18px; padding: 18px 0; }
+    .brand { font-family: var(--display); font-size: 20px; letter-spacing: .06em; text-decoration: none;
+      background: linear-gradient(90deg, var(--yellow), var(--pink) 60%, var(--orange)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+    nav .links { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+    nav .links a { text-decoration: none; color: var(--dim); font-weight: 700; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; padding: 8px 12px; border-radius: 8px; }
+    nav .links a:hover { color: var(--ink); background: var(--bg-3); }
+
+    /* buttons */
+    .btn { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; border: 1px solid var(--line); background: var(--bg-3); color: var(--ink);
+      font-weight: 700; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; padding: 14px 22px; border-radius: 12px; transition: transform .1s, box-shadow .2s; }
+    .btn:hover { transform: translateY(-2px); }
+    .btn.primary { font-family: var(--display); font-weight: 400; font-size: 22px; padding: 18px 34px; border-radius: 16px; border-color: transparent; color: #fff;
+      background: linear-gradient(135deg, var(--pink), #ff5a3c); box-shadow: 0 10px 40px rgba(255,45,117,.45); }
+    .btn.primary:hover { box-shadow: 0 16px 60px rgba(255,45,117,.65); }
+
+    /* hero */
+    .hero { padding: 60px 0 40px; text-align: center; }
+    .logo { position: relative; font-family: var(--display); font-size: clamp(56px, 11vw, 150px); line-height: .9; letter-spacing: .02em; margin: 0; }
+    .logo .a { display: block; background: linear-gradient(180deg, #fff 0%, var(--yellow) 45%, var(--orange) 60%, var(--pink) 100%); -webkit-background-clip: text; background-clip: text; color: transparent; filter: drop-shadow(0 0 24px rgba(255,45,117,.6)); }
+    .logo::before { content: 'DRUMKILLER'; position: absolute; inset: 0; color: transparent; -webkit-text-stroke: 1.5px rgba(255,255,255,.25); transform: translate(6px, 6px); z-index: -1; }
+    .logo .b { display: block; font-size: .42em; letter-spacing: .3em; color: var(--dim); margin-top: 10px; }
+    .lede { max-width: 640px; margin: 26px auto 34px; font-size: 19px; color: var(--dim); }
+    .lede strong { color: var(--ink); }
+    .cta { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; align-items: center; }
+    .fine { color: var(--mute); font-size: 13px; margin-top: 16px; }
+    .fine kbd { font-family: var(--mono); font-size: 11px; padding: 2px 6px; border-radius: 6px; background: var(--bg-3); border: 1px solid var(--line); border-bottom-width: 2px; }
+    .shot { margin: 46px auto 0; border-radius: 18px; overflow: hidden; border: 1px solid var(--line); box-shadow: 0 30px 90px rgba(0,0,0,.6), 0 0 80px rgba(255,45,117,.18); position: relative; }
+    .shot img { display: block; width: 100%; height: auto; }
+    .shot::after { content: ''; position: absolute; inset: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); pointer-events: none; }
+
+    /* lanes strip */
+    .lanes { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 50px auto 0; }
+    .lane { padding: 14px 8px; border-radius: 12px; background: var(--bg-2); border: 1px solid var(--line); text-align: center; font-family: var(--display); font-size: 12px; letter-spacing: .1em; color: var(--c); box-shadow: inset 0 -3px 0 var(--c); }
+    .lane .g { display: block; font-size: 26px; margin-bottom: 4px; font-family: var(--body); }
+
+    /* sections */
+    section { padding: 70px 0; }
+    h2 { font-family: var(--display); font-size: clamp(28px, 4vw, 44px); margin: 0 0 8px; line-height: 1; }
+    .sub { color: var(--dim); font-size: 17px; margin: 0 0 30px; max-width: 640px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); } }
+    .card { background: rgba(20,18,28,.85); border: 1px solid var(--line); border-radius: 16px; padding: 22px; backdrop-filter: blur(10px); }
+    .card h3 { font-family: var(--display); font-weight: 400; font-size: 15px; letter-spacing: .06em; margin: 0 0 8px; color: var(--c, var(--ink)); }
+    .card p { margin: 0; color: var(--dim); font-size: 15px; }
+    .card .n { font-family: var(--mono); font-size: 12px; color: var(--mute); margin-bottom: 8px; }
+
+    .gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+    .gallery figure { margin: 0; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: var(--bg-2); }
+    .gallery img { display: block; width: 100%; height: auto; }
+    .gallery figcaption { padding: 12px 14px; font-size: 13px; color: var(--dim); }
+    .gallery figcaption b { color: var(--ink); font-family: var(--display); font-weight: 400; font-size: 12px; letter-spacing: .08em; display: block; margin-bottom: 2px; }
+
+    .steps { counter-reset: s; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+    .step { position: relative; padding: 20px 18px 18px 18px; border-radius: 14px; background: var(--bg-2); border: 1px solid var(--line); }
+    .step::before { counter-increment: s; content: counter(s); font-family: var(--display); font-size: 34px; color: var(--pink); display: block; line-height: 1; margin-bottom: 8px; text-shadow: 0 0 20px rgba(255,45,117,.6); }
+    .step b { display: block; margin-bottom: 4px; }
+    .step span { color: var(--dim); font-size: 14px; }
+    pre { background: #000; border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; font-family: var(--mono); font-size: 13px; color: var(--lime); overflow-x: auto; }
+    pre .c { color: var(--mute); }
+
+    .hw { display: flex; flex-wrap: wrap; gap: 10px; }
+    .pill { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg-3); font-size: 13px; font-weight: 700; letter-spacing: .04em; }
+    .pill.hot { border-color: rgba(255,45,117,.5); background: rgba(255,45,117,.18); }
+
+    footer { padding: 40px 0 60px; color: var(--mute); font-size: 13px; border-top: 1px solid var(--line); margin-top: 40px; display: flex; gap: 20px; flex-wrap: wrap; align-items: center; }
+    footer .spacer { flex: 1; }
+    @media (max-width: 720px) { .lanes { grid-template-columns: repeat(3, 1fr); } .hero { padding-top: 30px; } }
+  </style>
+</head>
+<body>
+  <div class="sky"></div>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="#">DRUMKILLER</a>
+      <div class="links">
+        <a href="#features">Features</a>
+        <a href="#studio">Make songs</a>
+        <a href="#hardware">Hardware</a>
+        <a href="https://github.com/sam1am/drumkiller">GitHub</a>
+      </div>
+    </nav>
+
+    <header class="hero">
+      <h1 class="logo"><span class="a">DRUMKILLER</span><span class="b">FINGER DRUM ARCADE</span></h1>
+      <p class="lede">Guitar Hero for <strong>finger drumming</strong>. Plug in your MIDI pads, hit the notes as they fly down a neon highway, chase the high score, and turn your own grooves into shareable charts. <strong>Free, open source, runs in your browser.</strong></p>
+      <div class="cta">
+        <a class="btn primary" href="play/">▶ &nbsp;PLAY NOW</a>
+        <a class="btn" href="https://github.com/sam1am/drumkiller">Source on GitHub</a>
+      </div>
+      <p class="fine">Chrome or Edge recommended for MIDI. No pads handy? Play with <kbd>D</kbd> <kbd>F</kbd> <kbd>Space</kbd> <kbd>G</kbd> <kbd>H</kbd> <kbd>K</kbd> <kbd>L</kbd> <kbd>A</kbd>. Nothing to install, nothing leaves your browser.</p>
+      <div class="shot"><img src="assets/gameplay.jpg" alt="DRUMKILLER gameplay: a neon note highway with hi-hat, snare, kick, toms and ride lanes, a tom fill incoming and a full-width crash bar" width="1280" height="800" /></div>
+      <div class="lanes">
+        <div class="lane" style="--c:#ffe600"><span class="g">✕ ◯</span>HI-HAT</div>
+        <div class="lane" style="--c:#ff2d75"><span class="g">●</span>SNARE</div>
+        <div class="lane" style="--c:#ff7a1a"><span class="g">▬</span>KICK</div>
+        <div class="lane" style="--c:#4d8dff"><span class="g">⬢⬢⬢</span>TOMS</div>
+        <div class="lane" style="--c:#8dff5a"><span class="g">◉</span>RIDE</div>
+        <div class="lane" style="--c:#fff6c8"><span class="g">━━━</span>CRASH</div>
+      </div>
+    </header>
+
+    <section id="features">
+      <h2>BUILT FOR PADS, NOT PLASTIC GUITARS</h2>
+      <p class="sub">Every drum gets its own track. Hi-hats show open and closed symbols, the three toms share one lane, and the crash slams across the whole highway.</p>
+      <div class="grid">
+        <div class="card" style="--c:#ffe600"><div class="n">01</div><h3>FOUR DIFFICULTIES</h3><p>Easy, medium, hard, expert. Chart only the expert part and the easier versions are generated with musical rules: ghost notes go first, hats thin out, fills collapse to their last hit.</p></div>
+        <div class="card" style="--c:#ff2d75"><div class="n">02</div><h3>REAL SCORING</h3><p>Perfect / great / good windows, a 4× combo multiplier, overhit penalties, star ratings, full-combo badges and a local leaderboard for every song and difficulty.</p></div>
+        <div class="card" style="--c:#3ef2ff"><div class="n">03</div><h3>PRACTICE MODE</h3><p>Slow the song to 50%, loop a section with A/B points, seek around, and turn on guide drums to hear the part. Practice never touches your scores.</p></div>
+        <div class="card" style="--c:#8dff5a"><div class="n">04</div><h3>YOUR KIT, YOUR SOUND</h3><p>A punchy synthesized drum kit is built in, so there is nothing to download. Any song can ship its own samples per drum, or you can let your FGDP make the noise.</p></div>
+        <div class="card" style="--c:#ff7a1a"><div class="n">05</div><h3>PAD SETUP WIZARD</h3><p>Hit the pad for kick, snare, toms, hats, ride, crash. Assign several pads to one drum. Saved per device, with presets for the FGDP-30/50 and generic 4×4 controllers.</p></div>
+        <div class="card" style="--c:#9d6bff"><div class="n">06</div><h3>LATENCY CALIBRATION</h3><p>A twelve-click test measures how late your hits land and dials in the offset automatically. Hit timing is stamped by the MIDI driver, not by the frame rate.</p></div>
+      </div>
+    </section>
+
+    <section id="shots">
+      <h2>SCREENS</h2>
+      <p class="sub">The whole thing is one static web app. Scores, settings and imported songs live in your browser.</p>
+      <div class="gallery">
+        <figure><img src="assets/songs.jpg" alt="Song select screen" loading="lazy" /><figcaption><b>SONG SELECT</b>Difficulty picker, per-difficulty bests, leaderboard, drag-and-drop zip import.</figcaption></figure>
+        <figure><img src="assets/practice.jpg" alt="Practice mode with speed and loop controls" loading="lazy" /><figcaption><b>PRACTICE</b>Speed, seek, A/B loop and guide drums live on the highway.</figcaption></figure>
+        <figure><img src="assets/results.png" alt="Results screen with stars and leaderboard" loading="lazy" /><figcaption><b>RESULTS</b>Stars, accuracy, judgement breakdown, new-personal-best callouts.</figcaption></figure>
+        <figure><img src="assets/studio.png" alt="Studio quantize screen" loading="lazy" /><figcaption><b>STUDIO</b>Quantize a recorded take with grid, strength, swing and double-hit merge, then preview it.</figcaption></figure>
+        <figure><img src="assets/wizard.png" alt="Pad setup wizard" loading="lazy" /><figcaption><b>PAD SETUP</b>A guided walk through every drum with a live MIDI monitor.</figcaption></figure>
+      </div>
+    </section>
+
+    <section id="studio">
+      <h2>MAKE A SONG IN FIVE MINUTES</h2>
+      <p class="sub">The Studio turns a performance into a chart. No DAW required, but the output is standard MIDI if you want to polish it in one.</p>
+      <div class="steps">
+        <div class="step"><b>Load a drum-less mix</b><span>mp3, wav, flac, aac, m4a or ogg. Tap the tempo, then hit a pad on the first downbeat to set the offset.</span></div>
+        <div class="step"><b>Record a take</b><span>Count-in, metronome, and every pad hit captured with velocity while the highway carves your chart behind you.</span></div>
+        <div class="step"><b>Quantize</b><span>1/4 to 1/32, triplets, adjustable strength and swing. Preview with the song and your drums.</span></div>
+        <div class="step"><b>Save &amp; share</b><span>Save as any difficulty, export the MIDI, or download the whole song as a zip. Drop it in a friend's song list.</span></div>
+      </div>
+      <pre><span class="c"># a song is just a folder — zip it and share it</span>
+my-song/
+  song.json         <span class="c"># title, artist, bpm, offset, which files are which</span>
+  audio.mp3         <span class="c"># the mix without drums</span>
+  expert.mid        <span class="c"># GM drum notes on channel 10 — easier charts auto-derive</span>
+  samples/kick.wav  <span class="c"># optional per-drum sample overrides</span></pre>
+      <p class="fine">Full format spec: <a href="https://github.com/sam1am/drumkiller/blob/main/docs/SONG-FORMAT.md">SONG-FORMAT.md</a></p>
+    </section>
+
+    <section id="hardware">
+      <h2>WORKS WITH</h2>
+      <p class="sub">Anything that sends MIDI note-on messages over USB. Web MIDI runs on macOS, Windows and Linux in Chrome, Edge, Opera and Firefox 108+.</p>
+      <div class="hw">
+        <span class="pill hot">Yamaha FGDP-30 / FGDP-50</span>
+        <span class="pill">Akai MPD / MPK / MPC pads</span>
+        <span class="pill">Novation Launchpad</span>
+        <span class="pill">NI Maschine</span>
+        <span class="pill">Ableton Push</span>
+        <span class="pill">Any electronic drum kit</span>
+        <span class="pill">Your keyboard (fallback)</span>
+      </div>
+    </section>
+
+    <section style="text-align:center">
+      <h2>READY?</h2>
+      <p class="sub" style="margin-inline:auto">Two original demo tracks are bundled. Bring your own after that.</p>
+      <a class="btn primary" href="play/">▶ &nbsp;PLAY DRUMKILLER</a>
+    </section>
+
+    <footer>
+      <span>DRUMKILLER · open source · MIT</span>
+      <span class="spacer"></span>
+      <a href="https://github.com/sam1am/drumkiller">github.com/sam1am/drumkiller</a>
+    </footer>
+  </div>
+</body>
+</html>

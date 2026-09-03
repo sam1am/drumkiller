@@ -1,5 +1,7 @@
 # DRUMKILLER
 
+**Play it now: https://sam1am.github.io/drumkiller/**
+
 A finger-drumming rhythm game in the spirit of Guitar Hero — for MIDI pad controllers (4×4 pads, Yamaha FGDP-30/50, e-kits) — that runs in the browser on Mac, Linux, and Windows.
 
 ```
@@ -52,6 +54,10 @@ scripts/          make-demo-song.mjs — generates the two bundled demo songs (a
 public/songs/     bundled songs (index.json lists folder names)
 docs/SONG-FORMAT.md
 ```
+
+## Deploying
+
+Pushes to `main` run `.github/workflows/pages.yml`, which runs the tests, builds the game, and publishes `docs/` (landing page) plus the build under `/play` to GitHub Pages.
 
 ## Adding songs
 
