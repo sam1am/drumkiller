@@ -25,6 +25,10 @@ Use **Chrome or Edge** (Web MIDI). Firefox 108+ also works. Safari has no Web MI
 - **Built-in drum kit**: synthesized at startup (no downloads); any song can override any drum with its own samples.
 - **Latency calibration** in Settings, plus a keyboard fallback so you can play with no hardware.
 
+## Chart editor
+
+Song list → **EDIT CHART** (or Studio → **OPEN IN EDITOR**) opens a piano-roll editor: one row per drum over the song's waveform and beat grid. Click to add a note, drag to move it (across rows to change the drum), shift-drag for marquee selection, right-click to delete, ⌘Z/⇧⌘Z undo/redo, ⌘D duplicate a bar later, arrow keys nudge on the snap grid, velocity slider, snap grid from 1/4 to 1/32 and triplets, ⌘+wheel to zoom. Space plays the song with your drum samples; while playing, pad hits insert notes at the playhead. Save writes `<difficulty>.mid` back into the song folder in your library, or export the MIDI / whole song zip.
+
 ## Keyboard fallback
 
 | Key | Drum |

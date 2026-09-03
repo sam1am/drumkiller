@@ -121,6 +121,7 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
       practice ? h('div', { class: 'hint-box' }, 'Practice mode: adjust speed, loop sections, hear guide drums. Scores are not saved.') : lb,
       h('div', { class: 'btn-row', style: { marginTop: '20px' } },
         button(practice ? 'PRACTICE' : 'PLAY', () => play(e), 'primary big'),
+        button('EDIT CHART', () => edit(e)),
         e.source !== 'bundled' ? button('REMOVE', () => remove(e), 'danger') : null,
       ),
     );
@@ -132,6 +133,17 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
     try {
       const pkg = await app.library.load(e);
       app.navigate('game', { pkg, difficulty, mode: practice ? 'practice' : 'play' });
+    } catch (err) {
+      toast(`Could not load song: ${(err as Error).message}`, 'bad');
+    }
+  }
+
+  async function edit(e: SongListEntry): Promise<void> {
+    stopPreview();
+    await app.boot();
+    try {
+      const pkg = await app.library.load(e);
+      app.navigate('editor', { pkg, difficulty });
     } catch (err) {
       toast(`Could not load song: ${(err as Error).message}`, 'bad');
     }

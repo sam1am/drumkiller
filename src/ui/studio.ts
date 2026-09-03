@@ -433,6 +433,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         ),
         h('div', { class: 'btn-row', style: { marginTop: '24px' } },
           button('PLAY IT NOW', async () => { const out = finalize(); await app.library.import(out); app.navigate('game', { pkg: out, difficulty: diff, mode: 'play' }); }),
+          button('OPEN IN EDITOR', async () => { const out = finalize(); await app.library.import(out); studioState.pkg = out; app.navigate('editor', { pkg: out, difficulty: diff, back: 'studio' }); }),
           button('← QUANTIZE', () => go('quantize'), 'ghost'),
           button('DONE', () => app.navigate('title'), 'ghost'),
         ),
