@@ -37,7 +37,14 @@ Use **Chrome or Edge** (Web MIDI). Firefox 108+ also works. Safari has no Web MI
 | L | ride |
 | A / ; | crash |
 
-`Esc` pauses.
+`Esc` pauses. `[` / `]` nudge the input offset by 10 ms while playing.
+
+## Timing feels off?
+
+- The HUD shows your average timing error live ("+120ms LATE"), and stray hits show how far they were from the nearest note.
+- Pause (`Esc`) → **AUTO-FIX OFFSET** sets the input offset from what you have played so far. The results screen offers the same.
+- Settings → **Hit window size** scales the perfect/great/good windows (default 1.5×; presets from TIGHT to VERY LOOSE), and **Strict drums** can be turned off so any drum on the same lane counts.
+- Settings → **Run calibration** for a click-based measurement. Pad Setup's MIDI monitor shows each event's timestamp skew; if a device reports timestamps in the wrong clock domain the game falls back to arrival time automatically.
 
 ## Project layout
 

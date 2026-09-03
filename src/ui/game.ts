@@ -65,6 +65,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
   const progressEl = h('div');
   const countdownEl = h('div', { class: 'countdown' });
   const modeTag = h('div', { class: 'mode-tag' });
+  const timingEl = h('div', { class: 'timing' }, '');
   const practiceBar = h('div', { class: 'practice-bar' });
   const loading = h('div', { class: 'pause-overlay' }, h('div', { class: 'display', style: { fontFamily: 'var(--font-display)', fontSize: '28px' } }, 'LOADING…'));
 
@@ -80,6 +81,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     h('div', { class: 'song-info' }, h('div', { class: 't' }, pkg.meta.title), h('div', { class: 'a' }, `${pkg.meta.artist} · ${difficulty.toUpperCase()}`)),
     h('div', { class: 'acc-box' }, accEl, starsEl),
     practiceBar,
+    timingEl,
     countdownEl,
   );
   const el = h('div', { class: 'screen game' }, canvas, hud, loading);
@@ -132,6 +134,8 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         guideDrums,
         metronome: mode === 'record' ? studioState.metronome : false,
         inputOffset: settings.inputOffset,
+        hitWindowScale: settings.hitWindowScale,
+        strictVoices: settings.strictVoices,
         scrollWindow: settings.scrollWindow,
         drumSoundsOnHit: settings.drumSoundsOnHit,
         reducedMotion: settings.reducedMotion,
@@ -148,8 +152,10 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
           multEl.classList.toggle('max', ev.multiplier >= 4);
           if (ev.kind === 'hit') showJudge(ev.judgement.toUpperCase() + (Math.abs(ev.delta) > 0.02 ? (ev.delta < 0 ? ' ‹' : ' ›') : ''), ev.judgement);
           else if (ev.kind === 'miss') showJudge('MISS', 'miss');
-          else showJudge('OVERHIT', 'miss');
+          else if (Number.isNaN(ev.delta)) showJudge('OVERHIT', 'miss');
+          else showJudge(`${ev.delta < 0 ? 'EARLY' : 'LATE'} ${Math.round(Math.abs(ev.delta) * 1000)}ms`, 'miss');
           const j = session!.judge;
+          updateTiming();
           accEl.textContent = `${(j.accuracy * 100).toFixed(1)}%`;
           const ratio = j.maxScore ? j.score / Math.max(1, (j.judgedCount / Math.max(1, j.totalNotes)) * j.maxScore) : 0;
           starsEl.textContent = starString(Math.min(5, Math.round(Math.max(0, Math.min(1, ratio)) * 10) / 2));
@@ -172,9 +178,39 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       app.input,
     );
     (window as unknown as { dkSession: GameSession | null }).dkSession = session;
+    updateTiming();
     loading.remove();
     if (mode === 'practice') buildPracticeBar();
     await session.start(mode === 'record' ? studioState.countInBars * (60 / pkg.meta.bpm) * 4 : 3);
+  }
+
+  let inputOffset = settings.inputOffset;
+  function updateTiming(): void {
+    if (!session || mode === 'record') return;
+    const st = session.judge.timingStats();
+    const avg = st.count ? `${st.mean > 0 ? '+' : ''}${Math.round(st.mean * 1000)}ms ${st.mean > 0.015 ? 'LATE' : st.mean < -0.015 ? 'EARLY' : 'ON TIME'}` : '—';
+    timingEl.textContent = `timing avg ${avg} (${st.count}) · offset ${Math.round(inputOffset * 1000)}ms · [ ] adjust`;
+  }
+  function nudgeOffset(deltaMs: number): void {
+    inputOffset = Math.round((inputOffset * 1000 + deltaMs)) / 1000;
+    app.settingsStore.update({ inputOffset });
+    session?.setInputOffset(inputOffset);
+    updateTiming();
+    toast(`Input offset ${Math.round(inputOffset * 1000)} ms`);
+  }
+  function autoFixOffset(): void {
+    if (!session) return;
+    const st = session.judge.timingStats();
+    if (st.count < 4) {
+      toast('Play a few more notes first', 'bad');
+      return;
+    }
+    inputOffset = Math.round((inputOffset - st.mean) * 1000) / 1000;
+    app.settingsStore.update({ inputOffset });
+    session.setInputOffset(inputOffset);
+    session.judge.reseek(session.chartTime);
+    updateTiming();
+    toast(`Input offset set to ${Math.round(inputOffset * 1000)} ms`, 'ok');
   }
 
   function buildPracticeBar(): void {
@@ -227,6 +263,19 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       return;
     }
     session.pause();
+    const st = session.judge.timingStats();
+    const timingPanel = mode === 'record' ? null : h(
+      'div',
+      { class: 'panel tight', style: { textAlign: 'center' } },
+      h('div', { class: 'small dim' }, 'TIMING'),
+      h('div', { class: 'mono' }, st.count ? `You are hitting ${Math.round(Math.abs(st.mean) * 1000)} ms ${st.mean > 0 ? 'LATE' : 'EARLY'} on average (${st.count} hits)` : 'No hits yet'),
+      h('div', { class: 'small mute' }, `Input offset: ${Math.round(inputOffset * 1000)} ms · window ×${settings.hitWindowScale.toFixed(2)}`),
+      h('div', { class: 'btn-row', style: { justifyContent: 'center', marginTop: '8px' } },
+        button('−10 ms', () => { nudgeOffset(-10); togglePause(); togglePause(); }, 'icon'),
+        button('AUTO-FIX OFFSET', () => { autoFixOffset(); togglePause(); }, Math.abs(st.mean) > 0.02 && st.count >= 4 ? 'primary' : ''),
+        button('+10 ms', () => { nudgeOffset(10); togglePause(); togglePause(); }, 'icon'),
+      ),
+    );
     pauseOverlay = h(
       'div',
       { class: 'pause-overlay' },
@@ -234,6 +283,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         'div',
         { class: 'menu' },
         h('h2', { class: 'display' }, 'PAUSED'),
+        timingPanel,
         button('RESUME', togglePause, 'primary'),
         mode === 'record' ? button('FINISH TAKE', () => { pauseOverlay?.remove(); pauseOverlay = null; session?.finishNow(); }) : null,
         button('RESTART', () => restart()),
@@ -261,13 +311,19 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       app.navigate('studio', { step: 'quantize' });
       return;
     }
-    app.navigate('results', { pkg, difficulty, mode, summary, rate });
+    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats() });
   }
 
   const onKey = (e: KeyboardEvent) => {
     if (e.code === 'Escape') {
       e.preventDefault();
       togglePause();
+    } else if (e.code === 'BracketLeft' && mode !== 'record') {
+      e.preventDefault();
+      nudgeOffset(-10);
+    } else if (e.code === 'BracketRight' && mode !== 'record') {
+      e.preventDefault();
+      nudgeOffset(10);
     }
   };
   window.addEventListener('keydown', onKey);

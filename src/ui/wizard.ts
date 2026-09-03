@@ -130,7 +130,7 @@ export function wizardScreen(app: App): Screen {
 
   function onRaw(hit: RawMidiHit): void {
     if (portName && hit.portName !== portName) return;
-    monitorLines.unshift(`note ${String(hit.note).padStart(3)}  ch ${String(hit.channel + 1).padStart(2)}  vel ${String(hit.velocity).padStart(3)}  ${GM_DRUM_NAMES[hit.note] ?? ''}`);
+    monitorLines.unshift(`note ${String(hit.note).padStart(3)}  ch ${String(hit.channel + 1).padStart(2)}  vel ${String(hit.velocity).padStart(3)}  ts ${hit.skew >= 0 ? '+' : ''}${Math.round(hit.skew)}ms${hit.timeStampFallback ? ' (ignored)' : ''}  ${GM_DRUM_NAMES[hit.note] ?? ''}`);
     monitorLines.splice(5);
     monitor.textContent = monitorLines.join('\n');
     if (testing) {

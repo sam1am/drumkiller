@@ -40,6 +40,11 @@ export function mergeSettings(raw: unknown): Settings {
     keyboard: mergeKeyboard(r.keyboard),
     theme: typeof r.theme === 'string' && r.theme ? r.theme : d.theme,
     reducedMotion: typeof r.reducedMotion === 'boolean' ? r.reducedMotion : d.reducedMotion,
+    hitWindowScale:
+      typeof r.hitWindowScale === 'number' && Number.isFinite(r.hitWindowScale) && r.hitWindowScale >= 0.25 && r.hitWindowScale <= 5
+        ? r.hitWindowScale
+        : d.hitWindowScale,
+    strictVoices: typeof r.strictVoices === 'boolean' ? r.strictVoices : d.strictVoices,
   };
   if (typeof r.lastDeviceKey === 'string' && r.lastDeviceKey) settings.lastDeviceKey = r.lastDeviceKey;
   return settings;

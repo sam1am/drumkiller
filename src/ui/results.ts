@@ -10,6 +10,17 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
   const mode = params?.mode as string;
   const summary = params?.summary as ScoreSummary;
   const rate = (params?.rate as number) ?? 1;
+  const timing = (params?.timing as { mean: number; count: number } | undefined) ?? { mean: 0, count: 0 };
+  const suggestedOffset = Math.round((app.settings.inputOffset - timing.mean) * 1000);
+  const showTiming = timing.count >= 4;
+  const timingBox: HTMLElement | null = showTiming
+    ? h('div', { class: 'hint-box', style: { marginTop: '16px' } },
+        h('div', null, `Timing: your hits averaged ${Math.round(Math.abs(timing.mean) * 1000)} ms ${timing.mean > 0 ? 'LATE' : 'EARLY'} (${timing.count} hits, offset ${Math.round(app.settings.inputOffset * 1000)} ms).`),
+        Math.abs(timing.mean) > 0.015
+          ? h('div', { class: 'btn-row', style: { marginTop: '8px' } }, button(`SET INPUT OFFSET TO ${suggestedOffset} MS`, () => { app.settingsStore.update({ inputOffset: suggestedOffset / 1000 }); timingBox?.replaceChildren(h('span', { class: 'pill ok' }, `Input offset set to ${suggestedOffset} ms`)); }, 'primary small'))
+          : h('div', { class: 'small dim' }, 'Nice — your timing offset is dialled in.'),
+      )
+    : null;
   const saved = mode === 'play';
   let rankInfo: { rank: number; isNewBest: boolean } | null = null;
   const entry: HighScore = { ...summary, songId: pkg.meta.id, difficulty, player: app.settings.playerName || 'PLAYER', date: Date.now() };
@@ -52,6 +63,7 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
             bar('GOOD', summary.hits.good, 'var(--good)'),
             bar('MISS', summary.hits.miss, 'var(--miss)'),
           ),
+          timingBox,
           h('div', { class: 'btn-row', style: { marginTop: '24px' } },
             button('PLAY AGAIN', () => app.navigate('game', { pkg, difficulty, mode }), 'primary'),
             button('SONG LIST', () => app.navigate(mode === 'practice' ? 'songs-practice' : 'songs')),

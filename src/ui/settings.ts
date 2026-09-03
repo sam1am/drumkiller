@@ -3,6 +3,8 @@ import { DRUM_VOICES, VOICE_LABELS, type DrumVoice } from '@/types';
 import { h, button, field, toast, clear, downloadBlob, pickFile } from './dom';
 import { topbar } from './topbar';
 import { VOICE_COLORS } from '@/game/renderer';
+import { hitWindowsFor } from '@/game/scoring';
+import { DIFFICULTIES } from '@/types';
 import { Metronome, Transport } from '@/audio';
 
 export function settingsScreen(app: App): Screen {
@@ -18,7 +20,13 @@ export function settingsScreen(app: App): Screen {
     return h('div', { class: 'row' }, input, label);
   };
 
-  const offsetInput = num(Math.round(s.inputOffset * 1000), 1, -300, 300, (ms) => app.settingsStore.update({ inputOffset: ms / 1000 }));
+  const offsetInput = num(Math.round(s.inputOffset * 1000), 1, -500, 500, (ms) => app.settingsStore.update({ inputOffset: ms / 1000 }));
+  const windowsTable = h('div', { class: 'small mono dim' });
+  function renderWindows(): void {
+    const sc = app.settings.hitWindowScale;
+    windowsTable.textContent = DIFFICULTIES.map((d) => { const w = hitWindowsFor(d, sc); return `${d}: ±${Math.round(w.perfect * 1000)} / ±${Math.round(w.great * 1000)} / ±${Math.round(w.good * 1000)} ms`; }).join('   ·   ');
+  }
+  renderWindows();
 
   // keyboard binding editor
   const keys = h('div', { class: 'voice-list' });
@@ -77,11 +85,16 @@ export function settingsScreen(app: App): Screen {
     m.setOffset(beat); // first click at 1 beat in
     await m.prepare();
     const deltas: number[] = [];
+    let received = 0;
+    let fallbacks = 0;
     const unsub = app.input.onHit((hit) => {
+      received++;
+      if (hit.raw && app.input.midi.fallbackCount) fallbacks = app.input.midi.fallbackCount;
       const pos = t.positionAtPerfTime(hit.timeStamp) - beat - app.engine.inputLatencyCompensation;
       const nearest = Math.round(pos / beat) * beat;
       const d = pos - nearest;
-      if (Math.abs(d) < beat / 2 && nearest >= 0 && nearest < beat * clicks) deltas.push(d);
+      // Accept anything near a click (the click grid runs from 0 to clicks-1 beats; allow one beat of slack).
+      if (nearest >= -beat && nearest <= beat * clicks) deltas.push(d);
     });
     toast('Calibrating… hit along with the clicks');
     t.play(0);
@@ -91,7 +104,7 @@ export function settingsScreen(app: App): Screen {
     t.stop();
     unsub();
     if (deltas.length < 4) {
-      toast('Not enough hits registered. Try again.', 'bad');
+      toast(received ? `Received ${received} hits but only ${deltas.length} lined up with the clicks — timestamps look off (MIDI monitor in Pad Setup shows the skew).` : 'No hits registered. Check Pad Setup / MIDI connection.', 'bad', 6000);
       renderCalib();
       return;
     }
@@ -102,7 +115,7 @@ export function settingsScreen(app: App): Screen {
     app.settingsStore.update({ inputOffset: -mean });
     offsetInput.value = String(Math.round(-mean * 1000));
     renderCalib({ mean, n: deltas.length });
-    toast(`Input offset set to ${Math.round(-mean * 1000)} ms`, 'ok');
+    toast(`Input offset set to ${Math.round(-mean * 1000)} ms (${deltas.length}/${received} hits used${fallbacks ? ', hardware timestamps ignored' : ''})`, 'ok', 5000);
   }
   renderCalib();
 
@@ -124,6 +137,11 @@ export function settingsScreen(app: App): Screen {
           h('h3', null, 'Timing'),
           field('Input offset (ms)', offsetInput, 'Positive = your hits are judged earlier. Negative = later. Use calibration below if unsure.'),
           field('Highway length (seconds visible)', range(s.scrollWindow, 0.8, 3, 0.1, (v) => app.settingsStore.update({ scrollWindow: v })), 'Shorter = faster notes.'),
+          field('Hit window size', range(s.hitWindowScale, 0.5, 3, 0.05, (v) => { app.settingsStore.update({ hitWindowScale: v }); renderWindows(); }), '1.0 = arcade-tight. Bigger = more forgiving. Applies to perfect / great / good equally.'),
+          windowsTable,
+          h('div', { class: 'btn-row', style: { margin: '6px 0 12px' } }, ...[['TIGHT', 1], ['NORMAL', 1.5], ['LOOSE', 2.2], ['VERY LOOSE', 3]].map(([label, v]) => button(String(label), () => { app.settingsStore.update({ hitWindowScale: Number(v) }); app.navigate('settings'); }, 'icon small'))),
+          h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.strictVoices, onChange: (e: Event) => app.settingsStore.update({ strictVoices: (e.target as HTMLInputElement).checked }) }), 'Strict drums on hard/expert (open vs closed hat, which tom). Off = any drum on the same lane counts.'),
+          h('div', { style: { height: '8px' } }),
           h('div', { style: { marginTop: '12px' } }, calib),
           h('h3', null, 'Audio'),
           field('Song volume', range(s.songVolume, 0, 1, 0.01, (v) => app.settingsStore.update({ songVolume: v }))),

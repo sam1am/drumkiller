@@ -78,6 +78,32 @@ describe('Judge', () => {
     expect(j.hit('kick', 2).judgement).toBe('perfect');
   });
 
+  it('overhit reports the signed distance to the nearest note on that lane', () => {
+    const j = new Judge([n(1, 'snare')], opts);
+    const ev = j.hit('snare', 1.25);
+    expect(ev.kind).toBe('overhit');
+    expect(ev.delta).toBeCloseTo(0.25, 5);
+    expect(j.timingStats().mean).toBeCloseTo(0.25, 5);
+    expect(Number.isNaN(j.hit('kick', 1.0).delta)).toBe(true);
+  });
+
+  it('timing diagnosis ignores dense same-lane runs', () => {
+    const hats = Array.from({ length: 8 }, (_, i) => n(1 + i * 0.15, 'hihatClosed'));
+    const j = new Judge([...hats, n(3, 'kick')], opts);
+    expect(j.notes[0].isolated).toBe(false);
+    expect(j.notes[8].isolated).toBe(true);
+    j.hit('hihatClosed', 1.16); // lands on hat #2 as 'perfect' — must not count as on-time evidence
+    expect(j.timingStats().count).toBe(0);
+    j.hit('kick', 3.25); // overhit 250ms late near the isolated kick
+    expect(j.timingStats()).toEqual({ mean: expect.closeTo(0.25, 5), count: 1 });
+  });
+
+  it('window scale widens all windows', () => {
+    const j = new Judge([n(1, 'snare')], { ...opts, windowScale: 2 });
+    expect(j.hit('snare', 1.2).judgement).toBe('good'); // 200ms > default 110ms good window
+    expect(hitWindowsFor('expert', 2).good).toBeCloseTo(0.22, 5);
+  });
+
   it('windows widen on easier difficulties', () => {
     expect(hitWindowsFor('easy').good).toBeGreaterThan(hitWindowsFor('expert').good);
   });

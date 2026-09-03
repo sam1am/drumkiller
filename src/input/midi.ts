@@ -7,7 +7,11 @@ export interface RawMidiHit {
   note: number;
   channel: number; // 0..15
   velocity: number; // 1..127
-  timeStamp: number; // performance.now()-based ms
+  timeStamp: number; // performance.now()-based ms (sanitised — see MidiInput.handleMessage)
+  /** event.timeStamp - performance.now() at arrival (ms). Small negative = healthy; huge = broken clock domain. */
+  skew: number;
+  /** True when the hardware timestamp was rejected and the arrival time used instead. */
+  timeStampFallback: boolean;
   portId: string;
   portName: string;
 }
@@ -30,6 +34,14 @@ export class MidiInput {
   private bound = new Map<string, MIDIInput>();
   /** Last error message if Web MIDI is unavailable or denied. */
   error: string | null = null;
+  /** Skew of the most recent event's hardware timestamp vs performance.now() (ms). */
+  lastSkew = 0;
+  /** How many events so far had an unusable hardware timestamp. */
+  fallbackCount = 0;
+  /** Force arrival-time stamping (for devices whose timestamps are unreliable). */
+  ignoreHardwareTimestamps = false;
+  /** Hardware timestamps further than this from performance.now() are considered broken (ms). */
+  static readonly MAX_SKEW_MS = 400;
 
   get supported(): boolean {
     return typeof navigator !== 'undefined' && 'requestMIDIAccess' in navigator;
@@ -118,11 +130,22 @@ export class MidiInput {
     const note = data[1];
     const velocity = data[2];
     if (status !== 0x90 || velocity === 0) return; // note-on only
+    // Web MIDI timestamps should share performance.now()'s clock, but some browser/driver combinations report
+    // a different clock domain (or 0). A hit can only plausibly be a little *older* than now, so anything
+    // outside a sane window is replaced by the arrival time.
+    const now = performance.now();
+    const raw = typeof ev.timeStamp === 'number' ? ev.timeStamp : 0;
+    const skew = raw - now;
+    this.lastSkew = skew;
+    const usable = !this.ignoreHardwareTimestamps && raw > 0 && skew <= 5 && skew >= -MidiInput.MAX_SKEW_MS;
+    if (!usable) this.fallbackCount++;
     const hit: RawMidiHit = {
       note,
       channel,
       velocity,
-      timeStamp: ev.timeStamp || performance.now(),
+      timeStamp: usable ? raw : now,
+      skew,
+      timeStampFallback: !usable,
       portId: port.id,
       portName: port.name ?? 'MIDI Input',
     };

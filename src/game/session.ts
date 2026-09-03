@@ -21,6 +21,8 @@ export interface SessionConfig {
   /** Record: count-in bars. */
   countInBars?: number;
   inputOffset: number;
+  hitWindowScale: number;
+  strictVoices: boolean;
   scrollWindow: number;
   drumSoundsOnHit: boolean;
   reducedMotion: boolean;
@@ -70,8 +72,9 @@ export class GameSession {
     this.transport.setRate(cfg.rate ?? 1);
     this.judge = new Judge(cfg.mode === 'record' ? [] : cfg.chart.notes, {
       difficulty: cfg.difficulty,
-      strictVoices: cfg.difficulty === 'hard' || cfg.difficulty === 'expert',
+      strictVoices: cfg.strictVoices && (cfg.difficulty === 'hard' || cfg.difficulty === 'expert'),
       overhitBreaksCombo: cfg.mode !== 'record',
+      windowScale: cfg.hitWindowScale,
     });
     this.renderer = new HighwayRenderer(canvas);
     this.renderer.setReducedMotion(cfg.reducedMotion);
@@ -99,6 +102,11 @@ export class GameSession {
   /** Chart time now. */
   get chartTime(): number {
     return this.transport.position - this.cfg.meta.offset;
+  }
+
+  /** Chart time as the judge sees it for a hit arriving now (input offset + latency compensation applied). */
+  private judgeTime(chartTime: number): number {
+    return chartTime + this.cfg.inputOffset - this.latencyComp * this.transport.rate;
   }
 
   get duration(): number {
@@ -164,6 +172,11 @@ export class GameSession {
     this.transport.setRate(rate);
   }
 
+  /** Live-adjust the input offset (seconds) — affects hits from now on. */
+  setInputOffset(seconds: number): void {
+    (this.cfg as { inputOffset: number }).inputOffset = seconds;
+  }
+
   /** Practice: jump to a chart time. */
   seek(chartTime: number): void {
     const pos = chartTime + this.cfg.meta.offset;
@@ -188,7 +201,7 @@ export class GameSession {
     if (!this.running || this.paused) return;
     if (this.cfg.drumSoundsOnHit) this.kit.trigger(hit.voice, hit.velocity);
     const pos = this.transport.positionAtPerfTime(hit.timeStamp);
-    const t = pos - this.cfg.meta.offset + this.cfg.inputOffset - this.latencyComp * this.transport.rate;
+    const t = this.judgeTime(pos - this.cfg.meta.offset);
     if (this.cfg.mode === 'record') {
       if (t >= -0.5) this.recorded.push({ time: t, voice: hit.voice, velocity: hit.velocity });
       this.renderer.hitFlash(hit.voice, 'perfect');
@@ -216,7 +229,7 @@ export class GameSession {
     this.raf = requestAnimationFrame(this.loop);
     const t = this.chartTime;
     if (!this.paused) {
-      this.judge.update(t);
+      this.judge.update(this.judgeTime(t));
       if (this.cfg.loop && t >= this.cfg.loop.end) {
         this.seek(this.cfg.loop.start);
       }

@@ -1,7 +1,7 @@
-import { LANE_FOR_VOICE, type ChartNote, type Difficulty, type DrumVoice, type HitWindows, type Judgement, type ScoreSummary } from '@/types';
+import { LANE_FOR_VOICE, type ChartNote, type Difficulty, type DrumVoice, type HitWindows, type Judgement, type Lane, type ScoreSummary } from '@/types';
 
-/** Hit windows in seconds (±). Slightly wider on easier difficulties. */
-export function hitWindowsFor(difficulty: Difficulty): HitWindows {
+/** Base hit windows in seconds (±) before scaling. Slightly wider on easier difficulties. */
+export function baseHitWindows(difficulty: Difficulty): HitWindows {
   switch (difficulty) {
     case 'easy':
       return { perfect: 0.05, great: 0.09, good: 0.14 };
@@ -14,6 +14,18 @@ export function hitWindowsFor(difficulty: Difficulty): HitWindows {
   }
 }
 
+/** Hit windows for a difficulty, scaled by the player's tolerance setting (1 = default). */
+export function hitWindowsFor(difficulty: Difficulty, scale = 1): HitWindows {
+  const b = baseHitWindows(difficulty);
+  const s = Math.max(0.25, Math.min(5, scale));
+  return { perfect: b.perfect * s, great: b.great * s, good: b.good * s };
+}
+
+/** How far (±s) to look for the nearest note when explaining an overhit. */
+export const NEAR_MISS_RANGE = 0.5;
+/** A note counts as isolated (usable for timing diagnosis) if no same-lane note is closer than this. */
+export const ISOLATION_RANGE = 0.5;
+
 export const BASE_NOTE_SCORE = 100;
 export const MAX_MULTIPLIER = 4;
 export const COMBO_PER_MULTIPLIER = 10;
@@ -22,7 +34,8 @@ export const JUDGEMENT_FACTOR: Record<Judgement, number> = { perfect: 1, great: 
 export interface JudgeEvent {
   kind: 'hit' | 'miss' | 'overhit';
   judgement: Judgement;
-  /** Signed timing error (hit time - note time), seconds. 0 for misses/overhits. */
+  /** Signed timing error (hit time - note time), seconds. 0 for misses. For overhits: distance to the nearest
+   * un-hit note of the same lane within NEAR_MISS_RANGE, or NaN if there is none. */
   delta: number;
   voice: DrumVoice;
   noteIndex: number; // -1 for overhits
@@ -34,6 +47,8 @@ export interface JudgeEvent {
 export interface TrackedNote extends ChartNote {
   index: number;
   state: 'pending' | 'hit' | 'missed';
+  /** No other note on the same lane within ISOLATION_RANGE — safe to use for timing diagnosis. */
+  isolated: boolean;
   judgement?: Judgement;
   delta?: number;
 }
@@ -45,6 +60,8 @@ export interface JudgeOptions {
   /** Overhits (hits with nothing to hit) break the combo. */
   overhitBreaksCombo: boolean;
   windows?: HitWindows;
+  /** Multiplier applied to the difficulty's base windows (ignored when `windows` is given). */
+  windowScale?: number;
 }
 
 /**
@@ -66,11 +83,23 @@ export class Judge {
   private deltaSum = 0;
   private deltaSigned = 0;
   private deltaCount = 0;
+  /** Signed distances of overhits to their nearest isolated note (for offset diagnosis). */
+  private nearMissSigned = 0;
+  private nearMissCount = 0;
+  /** Number of judged hits on isolated notes contributing to deltaSigned. */
+  private isoCount = 0;
 
   constructor(notes: ChartNote[], opts: JudgeOptions) {
     this.opts = opts;
-    this.windows = opts.windows ?? hitWindowsFor(opts.difficulty);
-    this.notes = notes.map((n, index) => ({ ...n, index, state: 'pending' as const }));
+    this.windows = opts.windows ?? hitWindowsFor(opts.difficulty, opts.windowScale ?? 1);
+    this.notes = notes.map((n, index) => ({ ...n, index, state: 'pending' as const, isolated: true }));
+    for (let i = 0; i < this.notes.length; i++) {
+      const a = this.notes[i];
+      for (let j = i + 1; j < this.notes.length && this.notes[j].time - a.time < ISOLATION_RANGE; j++) {
+        const b = this.notes[j];
+        if (LANE_FOR_VOICE[a.voice] === LANE_FOR_VOICE[b.voice]) a.isolated = b.isolated = false;
+      }
+    }
   }
 
   onEvent(fn: (ev: JudgeEvent) => void): () => void {
@@ -105,9 +134,9 @@ export class Judge {
     return this.deltaCount ? this.deltaSum / this.deltaCount : 0;
   }
 
-  /** Mean signed timing error (negative = early). */
+  /** Mean signed timing error over isolated hits (negative = early). */
   get meanSignedError(): number {
-    return this.deltaCount ? this.deltaSigned / this.deltaCount : 0;
+    return this.isoCount ? this.deltaSigned / this.isoCount : 0;
   }
 
   /** Accuracy 0..1 weighted by judgement factor over all judged notes. */
@@ -148,7 +177,12 @@ export class Judge {
     if (!best) {
       this.overhits++;
       if (this.opts.overhitBreaksCombo) this.combo = 0;
-      const ev: JudgeEvent = { kind: 'overhit', judgement: 'miss', delta: 0, voice, noteIndex: -1, combo: this.combo, score: this.score, multiplier: this.multiplier };
+      const near = this.nearestDelta(lane, t);
+      if (!Number.isNaN(near)) {
+        this.nearMissSigned += near;
+        this.nearMissCount++;
+      }
+      const ev: JudgeEvent = { kind: 'overhit', judgement: 'miss', delta: near, voice, noteIndex: -1, combo: this.combo, score: this.score, multiplier: this.multiplier };
       this.emit(ev);
       return ev;
     }
@@ -164,12 +198,40 @@ export class Judge {
     this.maxCombo = Math.max(this.maxCombo, this.combo);
     this.score += Math.round(BASE_NOTE_SCORE * JUDGEMENT_FACTOR[judgement] * this.multiplier);
     this.deltaSum += ad;
-    this.deltaSigned += delta;
     this.deltaCount++;
+    if (best.isolated) {
+      this.deltaSigned += delta;
+      this.isoCount++;
+    }
     this.advancePointer();
     const ev: JudgeEvent = { kind: 'hit', judgement, delta, voice: best.voice, noteIndex: best.index, combo: this.combo, score: this.score, multiplier: this.multiplier };
     this.emit(ev);
     return ev;
+  }
+
+  /** Signed distance (t - noteTime) to the nearest un-hit note on `lane` within NEAR_MISS_RANGE, else NaN. */
+  private nearestDelta(lane: Lane, t: number): number {
+    let best = NaN;
+    for (let i = 0; i < this.notes.length; i++) {
+      const n = this.notes[i];
+      if (n.time < t - NEAR_MISS_RANGE) continue;
+      if (n.time > t + NEAR_MISS_RANGE) break;
+      if (n.state === 'hit' || !n.isolated || LANE_FOR_VOICE[n.voice] !== lane) continue;
+      const d = t - n.time;
+      if (Number.isNaN(best) || Math.abs(d) < Math.abs(best)) best = d;
+    }
+    return best;
+  }
+
+  /**
+   * Timing diagnosis: mean signed error over hits on ISOLATED notes plus overhits near an isolated note.
+   * Dense runs (16th hats) are excluded because a late hit there silently lands on the next note.
+   * Positive = the player is consistently late (input offset should be negative).
+   */
+  timingStats(): { mean: number; count: number } {
+    const count = this.isoCount + this.nearMissCount;
+    if (!count) return { mean: 0, count: 0 };
+    return { mean: (this.deltaSigned + this.nearMissSigned) / count, count };
   }
 
   /** Mark every pending note older than (t - goodWindow) as missed. Call every frame. */
@@ -202,6 +264,9 @@ export class Judge {
     this.deltaSum = 0;
     this.deltaSigned = 0;
     this.deltaCount = 0;
+    this.nearMissSigned = 0;
+    this.nearMissCount = 0;
+    this.isoCount = 0;
     for (const n of this.notes) {
       n.state = n.time < t - this.windows.good ? 'hit' : 'pending';
       n.judgement = undefined;

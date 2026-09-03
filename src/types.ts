@@ -265,6 +265,10 @@ export interface Settings {
   /** Visual theme id. */
   theme: string;
   reducedMotion: boolean;
+  /** Multiplier on the hit windows (1 = default, 2 = twice as forgiving). */
+  hitWindowScale: number;
+  /** On hard/expert, require the exact drum voice (e.g. open vs closed hat, which tom). Off = any drum on the same lane counts. */
+  strictVoices: boolean;
 }
 
 export const DEFAULT_KEYBOARD: Record<DrumVoice, string[]> = {
@@ -289,4 +293,6 @@ export const DEFAULT_SETTINGS: Settings = {
   keyboard: DEFAULT_KEYBOARD,
   theme: 'inferno',
   reducedMotion: false,
+  hitWindowScale: 1.5,
+  strictVoices: true,
 };
