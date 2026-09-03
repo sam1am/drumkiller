@@ -141,7 +141,8 @@ export function defaultLibraryBackend(): LibraryBackend {
 
 // ─────────────────────────── Library ───────────────────────────
 
-export const BUNDLED_INDEX_URL = '/songs/index.json';
+/** Resolved against Vite's base URL so the app works when hosted under a subpath. */
+export const BUNDLED_INDEX_URL = `${(import.meta.env?.BASE_URL ?? '/').replace(/\/$/, '')}/songs/index.json`;
 
 function byTitle(a: SongListEntry, b: SongListEntry): number {
   return (
