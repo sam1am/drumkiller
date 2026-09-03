@@ -23,6 +23,19 @@ describe('SettingsStore', () => {
     expect(new SettingsStore(memoryKV({ [SETTINGS_KEY]: 'garbage' })).get()).toEqual(DEFAULT_SETTINGS);
   });
 
+  it('validates video recording settings', () => {
+    const s = new SettingsStore(memoryKV({ [SETTINGS_KEY]: JSON.stringify({ recordVideo: true, recordCamLayout: 'sideways', recordResolution: 480, recordCameraId: 'cam-1' }) })).get();
+    expect(s.recordVideo).toBe(true);
+    expect(s.recordCamLayout).toBe(DEFAULT_SETTINGS.recordCamLayout);
+    expect(s.recordResolution).toBe(DEFAULT_SETTINGS.recordResolution);
+    expect(s.recordCameraId).toBe('cam-1');
+    const store = new SettingsStore(memoryKV());
+    store.update({ recordCameraId: 'cam-2', recordResolution: 1080, recordCamLayout: 'column' });
+    expect(store.get()).toMatchObject({ recordCameraId: 'cam-2', recordResolution: 1080, recordCamLayout: 'column' });
+    store.update({ recordCameraId: undefined });
+    expect('recordCameraId' in store.get()).toBe(false);
+  });
+
   it('update persists, deep-merges keyboard, and notifies subscribers', () => {
     const kv = memoryKV();
     const store = new SettingsStore(kv);

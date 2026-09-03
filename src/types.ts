@@ -271,7 +271,22 @@ export interface Settings {
   laneOrder: Lane[];
   /** On hard/expert, require the exact drum voice (e.g. open vs closed hat, which tom). Off = any drum on the same lane counts. */
   strictVoices: boolean;
+  /** Record play/practice sessions as a video (webcam + game screen) and offer it on the results screen. */
+  recordVideo: boolean;
+  /** Webcam deviceId to record with (default camera when unset). */
+  recordCameraId?: string;
+  /** Mix the webcam's microphone into the recording (raw, no voice processing). */
+  recordMic: boolean;
+  /** Where the webcam goes in the recorded video. */
+  recordCamLayout: CamLayout;
+  /** Output height in pixels (16:9). */
+  recordResolution: RecordResolution;
 }
+
+export type CamLayout = 'pip' | 'column';
+export const CAM_LAYOUTS: CamLayout[] = ['pip', 'column'];
+export type RecordResolution = 720 | 1080;
+export const RECORD_RESOLUTIONS: RecordResolution[] = [720, 1080];
 
 export const DEFAULT_KEYBOARD: Record<DrumVoice, string[]> = {
   kick: ['Space', 'KeyB'],
@@ -298,4 +313,8 @@ export const DEFAULT_SETTINGS: Settings = {
   hitWindowScale: 1.5,
   laneOrder: [...LANE_ORDER],
   strictVoices: true,
+  recordVideo: false,
+  recordMic: false,
+  recordCamLayout: 'pip',
+  recordResolution: 720,
 };

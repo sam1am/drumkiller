@@ -1,6 +1,7 @@
 import type { App, Screen } from '@/app';
 import type { Difficulty, HighScore, ScoreSummary, SongPackage } from '@/types';
-import { h, button, fmtScore, pct } from './dom';
+import { h, button, fmtScore, pct, downloadBlob } from './dom';
+import { fileExtensionFor, type RecordedVideo } from '@/game/videoRecorder';
 import { topbar } from './topbar';
 import { starString } from '@/game/scoring';
 
@@ -21,6 +22,23 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
           : h('div', { class: 'small dim' }, 'Nice — your timing offset is dialled in.'),
       )
     : null;
+  const video = params?.video as RecordedVideo | undefined;
+  let videoUrl: string | null = null;
+  let videoBox: HTMLElement | null = null;
+  if (video && video.blob.size) {
+    videoUrl = URL.createObjectURL(video.blob);
+    const ext = fileExtensionFor(video.mimeType);
+    const safe = (t: string) => t.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'song';
+    const filename = `drumkiller-${safe(pkg.meta.title)}-${difficulty}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.${ext}`;
+    const mb = (video.blob.size / 1_048_576).toFixed(1);
+    videoBox = h('div', { class: 'video-box', style: { marginTop: '20px' } },
+      h('video', { src: videoUrl, controls: true, playsInline: true, preload: 'metadata' }),
+      h('div', { class: 'btn-row', style: { marginTop: '10px' } },
+        button(`SAVE VIDEO (${mb} MB)`, () => downloadBlob(video.blob, filename), 'primary'),
+        h('span', { class: 'small dim' }, `${video.width}×${video.height} · ${Math.round(video.duration)}s · ${ext.toUpperCase()}${ext === 'webm' ? ' — plays in Chrome/Firefox/VLC' : ''}`),
+      ),
+    );
+  }
   const saved = mode === 'play';
   let rankInfo: { rank: number; isNewBest: boolean } | null = null;
   const entry: HighScore = { ...summary, songId: pkg.meta.id, difficulty, player: app.settings.playerName || 'PLAYER', date: Date.now() };
@@ -64,6 +82,7 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
             bar('MISS', summary.hits.miss, 'var(--miss)'),
           ),
           timingBox,
+          videoBox,
           h('div', { class: 'btn-row', style: { marginTop: '24px' } },
             button('PLAY AGAIN', () => app.navigate('game', { pkg, difficulty, mode }), 'primary'),
             button('SONG LIST', () => app.navigate(mode === 'practice' ? 'songs-practice' : 'songs')),
@@ -82,5 +101,10 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
       ),
     ),
   );
-  return { el };
+  return {
+    el,
+    dispose: () => {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+    },
+  };
 }

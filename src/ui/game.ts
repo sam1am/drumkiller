@@ -6,6 +6,7 @@ import { VOICE_COLORS } from '@/game/renderer';
 import { chartFromMidi, deriveDifficulty, parseMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
 import { getChartBlob, hardestAvailable } from '@/song';
 import { GameSession, type GameMode } from '@/game/session';
+import { VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot } from '@/game/videoRecorder';
 import { starString } from '@/game/scoring';
 import { h, button, toast, fmtScore, clear } from './dom';
 import { studioState } from './studioState';
@@ -92,18 +93,83 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
   const el = h('div', { class: `screen game ${mode === 'record' ? 'record' : ''}` }, canvas, hud, loading);
 
   let session: GameSession | null = null;
+  let recorder: VideoRecorder | null = null;
+  let lastJudge: HudSnapshot['judge'] = null;
+  let lastStreak: HudSnapshot['streak'] = null;
+  let countdown: number | null = null;
   let pauseOverlay: HTMLElement | null = null;
   let rate = mode === 'practice' ? Number(localStorage.getItem('dk.practiceRate') ?? 1) || 1 : 1;
   let guideDrums = mode === 'practice' ? localStorage.getItem('dk.guideDrums') === '1' : false;
   let loopA: number | null = null;
   let loopB: number | null = null;
 
+  const JUDGE_COLORS: Record<string, string> = { perfect: '#ffe600', great: '#8dff5a', good: '#3ef2ff', miss: '#ff3b3b' };
   const showJudge = (text: string, cls: string) => {
     judgeEl.textContent = text;
     judgeEl.className = `judge ${cls}`;
     void judgeEl.offsetWidth;
     judgeEl.classList.add('show');
+    lastJudge = { text, color: JUDGE_COLORS[cls] ?? '#fff', at: performance.now() };
   };
+
+  /** What the video recorder repaints over the highway (the DOM HUD is not captured). */
+  const hudSnapshot = (): HudSnapshot => ({
+    score: scoreEl.textContent ?? '0',
+    multiplier: multEl.textContent ?? '1×',
+    multiplierMax: multEl.classList.contains('max'),
+    combo: comboEl.textContent ?? '0',
+    accuracy: accEl.textContent ?? '',
+    stars: starsEl.textContent ?? '',
+    progress: parseFloat(progressEl.style.width || '0') / 100,
+    title: pkg.meta.title,
+    artist: pkg.meta.artist,
+    difficulty,
+    mode: mode === 'practice' ? 'practice' : 'play',
+    judge: lastJudge,
+    streak: lastStreak,
+    countdown,
+  });
+
+  /** Open the webcam and prepare the recorder (never fatal: the game still runs without it). */
+  async function setupRecorder(): Promise<void> {
+    if (!settings.recordVideo || mode === 'record') return;
+    if (!videoRecordingSupported()) {
+      toast('Video recording is not supported in this browser', 'bad', 4000);
+      return;
+    }
+    let camera: MediaStream | null = null;
+    try {
+      camera = await openCamera(settings.recordCameraId, settings.recordMic);
+    } catch (e) {
+      console.warn('camera unavailable', e);
+      toast(`Camera unavailable (${(e as Error).name}) — recording the game only`, 'bad', 4000);
+    }
+    try {
+      recorder = new VideoRecorder({
+        highway: canvas,
+        camera,
+        gameAudio: app.engine.captureNode.stream,
+        mic: settings.recordMic,
+        audioContext: app.engine.ctx,
+        captureNode: app.engine.captureNode,
+        height: settings.recordResolution,
+        layout: settings.recordCamLayout,
+        accent: pkg.meta.accent,
+        hud: hudSnapshot,
+      });
+      const cam = recorder.cameraElement;
+      if (cam) {
+        cam.className = `cam-preview ${settings.recordCamLayout}`;
+        hud.appendChild(cam);
+      }
+      modeTag.appendChild(h('span', { class: 'pill bad' }, h('span', { class: 'rec-dot' }), 'REC'));
+    } catch (e) {
+      console.error(e);
+      camera?.getTracks().forEach((t) => t.stop());
+      recorder = null;
+      toast(`Could not start video recording: ${(e as Error).message}`, 'bad', 4000);
+    }
+  }
 
   async function build(): Promise<void> {
     const audioBlob = pkg.files.get(pkg.meta.audio);
@@ -168,6 +234,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         },
         onStreak: (combo) => {
           streakEl.textContent = combo >= 100 ? `${combo} KILLSTREAK` : `${combo} COMBO`;
+          lastStreak = { text: streakEl.textContent, at: performance.now() };
           streakEl.classList.remove('show');
           void streakEl.offsetWidth;
           streakEl.classList.add('show');
@@ -180,8 +247,10 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
           }
         },
         onCountdown: (n) => {
+          countdown = n;
           countdownEl.textContent = n === null ? '' : String(n);
         },
+        onFrame: () => recorder?.frame(),
         onFinish: (summary, recorded) => finish(summary, recorded),
       },
       app.input,
@@ -192,8 +261,10 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       window.addEventListener('resize', onResizeWave);
     }
     updateTiming();
+    await setupRecorder();
     loading.remove();
     if (mode === 'practice') buildPracticeBar();
+    await recorder?.start();
     await session.start(mode === 'record' ? studioState.countInBars * (60 / pkg.meta.bpm) * 4 : 3);
   }
 
@@ -309,23 +380,38 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
 
   function restart(): void {
     session?.stop();
+    recorder?.discard();
+    recorder = null;
     app.navigate('game', params);
   }
 
   function quit(): void {
     session?.stop();
+    recorder?.discard();
+    recorder = null;
     if (mode === 'record') app.navigate('studio');
     else app.navigate(mode === 'practice' ? 'songs-practice' : 'songs');
   }
 
-  function finish(summary: ScoreSummary, recorded: PerformanceNote[]): void {
+  async function finish(summary: ScoreSummary, recorded: PerformanceNote[]): Promise<void> {
     if (mode === 'record') {
       studioState.recorded = recorded;
       toast(`Captured ${recorded.length} hits`, 'ok');
       app.navigate('studio', { step: 'quantize' });
       return;
     }
-    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats() });
+    let video: unknown = undefined;
+    if (recorder) {
+      const rec = recorder;
+      recorder = null;
+      try {
+        video = await rec.stop();
+      } catch (e) {
+        console.error(e);
+        toast('Video recording failed', 'bad');
+      }
+    }
+    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), video });
   }
 
   const onKey = (e: KeyboardEvent) => {
@@ -360,6 +446,8 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       window.removeEventListener('resize', onResizeWave);
       document.removeEventListener('visibilitychange', onVis);
       session?.stop();
+      recorder?.discard();
+      recorder = null;
     },
   };
 }

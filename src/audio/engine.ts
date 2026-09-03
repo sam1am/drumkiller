@@ -16,6 +16,7 @@ export class AudioEngine {
   private _master: GainNode | null = null;
   private _songBus: GainNode | null = null;
   private _drumBus: GainNode | null = null;
+  private _capture: MediaStreamAudioDestinationNode | null = null;
 
   private songVolume = 0.9;
   private drumVolume = 0.9;
@@ -72,6 +73,19 @@ export class AudioEngine {
   get drumBus(): GainNode {
     this.ctx;
     return this._drumBus!;
+  }
+
+  /**
+   * A MediaStream carrying everything that reaches the speakers (song + drums via master).
+   * Used by the performance video recorder; created lazily and kept for the life of the context.
+   */
+  get captureNode(): MediaStreamAudioDestinationNode {
+    const ctx = this.ctx;
+    if (!this._capture) {
+      this._capture = ctx.createMediaStreamDestination();
+      this._master!.connect(this._capture);
+    }
+    return this._capture;
   }
 
   get sampleRate(): number {
@@ -173,7 +187,7 @@ export class AudioEngine {
     if (this._ctx) {
       await this._ctx.close().catch(() => undefined);
       this._ctx = null;
-      this._master = this._songBus = this._drumBus = null;
+      this._master = this._songBus = this._drumBus = this._capture = null;
     }
   }
 }

@@ -7,4 +7,5 @@ Browser rhythm game for MIDI finger-drum pads. Vite + TypeScript, no UI framewor
 - Time model: `chartTime = transport.position − song.offset`. Input hits are timestamped with `performance.now()` and mapped to the audio clock via `AudioEngine.perfToAudioTime` (uses `getOutputTimestamp`, so no extra output-latency compensation on that path — see `inputLatencyCompensation`).
 - Charts are standard MIDI (GM drum notes, channel 10). `deriveDifficulty` is filter-only: easy ⊆ medium ⊆ hard ⊆ expert.
 - Song folder format is documented in `docs/SONG-FORMAT.md`; `public/songs/index.json` lists bundled folders.
+- Performance video: `src/game/videoRecorder.ts` composites highway canvas + webcam + a canvas repaint of the DOM HUD into an offscreen 16:9 canvas each frame (`SessionCallbacks.onFrame`), and records it with `MediaRecorder` together with `AudioEngine.captureNode` (master bus tap). The e2e test exercises it with Chrome's fake camera.
 - `window.dk` (App) and `window.dkSession` (active GameSession) are exposed for debugging and the e2e test.

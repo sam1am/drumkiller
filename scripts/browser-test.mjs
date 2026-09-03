@@ -5,7 +5,9 @@
  *   node scripts/browser-test.mjs [http://localhost:5173/]
  *
  * Boots the app, opens the song list, plays 12 s of "Back Pocket" on expert with a scripted
- * keyboard auto-player, and asserts the judge scored the hits. Screenshots land in ./.e2e/.
+ * keyboard auto-player, and asserts the judge scored the hits. Then turns on performance video
+ * recording (Chrome's fake camera), plays a short take and checks the results screen offers a WebM
+ * whose frames contain the composite. Screenshots (and a frame of the recording) land in ./.e2e/.
  * Set CHROME=/path/to/chrome to override the binary.
  */
 import { spawn } from 'node:child_process';
@@ -26,7 +28,7 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'dk-chrome-'));
 const outDir = path.resolve('.e2e');
 fs.mkdirSync(outDir, { recursive: true });
 
-const chrome = spawn(CHROME, [`--remote-debugging-port=${port}`, '--headless=new', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--window-size=1440,900', '--autoplay-policy=no-user-gesture-required', 'about:blank'], { stdio: 'ignore' });
+const chrome = spawn(CHROME, [`--remote-debugging-port=${port}`, '--headless=new', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, '--window-size=1440,900', '--autoplay-policy=no-user-gesture-required', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', 'about:blank'], { stdio: 'ignore' });
 let targets = null;
 for (let i = 0; i < 40 && !targets; i++) {
   await new Promise((r) => setTimeout(r, 500));
@@ -99,6 +101,37 @@ try {
   await click('QUIT');
   await sleep(800);
   assert((await evaluate(`location.hash`)) === '#songs', 'quit returns to song list');
+
+  // ── performance video recording (fake webcam) ──
+  await evaluate(`window.dk.settingsStore.update({ recordVideo: true, recordResolution: 720, recordCamLayout: 'pip' })`);
+  await evaluate(`Array.from(document.querySelectorAll('.songcard')).find(c => c.textContent.includes('Back Pocket')).click()`);
+  await sleep(600);
+  await evaluate(`document.querySelector('.diff[data-d=medium]').click()`);
+  await click('PLAY');
+  await sleep(5000);
+  assert(await evaluate(`!!document.querySelector('.hud .cam-preview') && document.querySelector('.hud .cam-preview').videoWidth > 0`), 'webcam preview is live in the HUD');
+  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF', bubbles: true }))`);
+  await sleep(2500);
+  await shot('04-recording.png');
+  await evaluate(`window.dkSession.finishNow()`);
+  await sleep(2500);
+  assert((await evaluate(`location.hash`)) === '#results', 'take finished → results screen');
+  const vid = await evaluate(`(async () => {
+    const v = document.querySelector('.video-box video'); if (!v) return null;
+    const r = await fetch(v.src); const blob = await r.blob();
+    const probe = document.createElement('video'); probe.muted = true; probe.src = URL.createObjectURL(blob);
+    await new Promise((res) => { probe.onloadeddata = res; probe.onerror = res; });
+    probe.currentTime = 3;
+    await new Promise((res) => { probe.onseeked = res; setTimeout(res, 3000); });
+    const c = document.createElement('canvas'); c.width = probe.videoWidth; c.height = probe.videoHeight;
+    c.getContext('2d').drawImage(probe, 0, 0);
+    return { size: blob.size, type: blob.type, w: probe.videoWidth, h: probe.videoHeight, png: c.toDataURL('image/png').split(',')[1] };
+  })()`);
+  assert(vid && vid.size > 50_000, `results screen offers a recording (${vid ? (vid.size / 1024).toFixed(0) + ' KB ' + vid.type : 'none'})`);
+  assert(vid.w === 1280 && vid.h === 720, `recording is 1280×720 (got ${vid.w}×${vid.h})`);
+  fs.writeFileSync(path.join(outDir, '05-recording-frame.png'), Buffer.from(vid.png, 'base64'));
+  await shot('06-results-video.png');
+  await evaluate(`window.dk.settingsStore.update({ recordVideo: false })`);
   const errors = logs.filter((l) => !l.includes('favicon'));
   assert(errors.length === 0, `no console errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
   console.log(`\nAll good. Screenshots in ${outDir}`);

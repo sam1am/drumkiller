@@ -1,6 +1,7 @@
 import type { App, Screen } from '@/app';
 import { DRUM_VOICES, VOICE_LABELS, type DrumVoice } from '@/types';
-import { h, button, field, toast, clear, downloadBlob, pickFile } from './dom';
+import { h, button, field, select, toast, clear, downloadBlob, pickFile } from './dom';
+import { openCamera, videoRecordingSupported } from '@/game/videoRecorder';
 import { topbar } from './topbar';
 import { VOICE_COLORS } from '@/game/renderer';
 import { hitWindowsFor } from '@/game/scoring';
@@ -150,6 +151,60 @@ export function settingsScreen(app: App): Screen {
   }
   renderCalib();
 
+  // performance video recording
+  const camSelect = select([{ value: '', label: 'Default camera' }], s.recordCameraId ?? '', (v) => app.settingsStore.update({ recordCameraId: v || undefined }));
+  async function listCameras(requestPermission: boolean): Promise<void> {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    if (requestPermission) {
+      // Labels are only revealed once the page has camera permission.
+      try {
+        const probe = await navigator.mediaDevices.getUserMedia({ video: true });
+        probe.getTracks().forEach((t) => t.stop());
+      } catch (e) {
+        toast(`Camera permission denied (${(e as Error).name})`, 'bad');
+        return;
+      }
+    }
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    clear(camSelect);
+    camSelect.appendChild(h('option', { value: '' }, 'Default camera'));
+    cams.forEach((c, i) => camSelect.appendChild(h('option', { value: c.deviceId, selected: c.deviceId === app.settings.recordCameraId }, c.label || `Camera ${i + 1}`)));
+    if (requestPermission) toast(cams.length ? `${cams.length} camera${cams.length === 1 ? '' : 's'} found` : 'No cameras found', cams.length ? 'ok' : 'bad');
+  }
+  void listCameras(false);
+  const camTest = h('div', { class: 'cam-test' });
+  let testStream: MediaStream | null = null;
+  function stopCamTest(): void {
+    testStream?.getTracks().forEach((t) => t.stop());
+    testStream = null;
+    clear(camTest);
+    testBtn.textContent = 'TEST CAMERA';
+  }
+  const testBtn = button('TEST CAMERA', async () => {
+    if (testStream) return stopCamTest();
+    try {
+      testStream = await openCamera(app.settings.recordCameraId, false);
+      const v = h('video', { autoplay: true, muted: true, playsInline: true });
+      v.srcObject = testStream;
+      camTest.appendChild(v);
+      testBtn.textContent = 'STOP TEST';
+      void listCameras(false);
+    } catch (e) {
+      toast(`Camera unavailable (${(e as Error).name})`, 'bad');
+    }
+  });
+  const videoPanel = videoRecordingSupported()
+    ? [
+        h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordVideo, onChange: (e: Event) => app.settingsStore.update({ recordVideo: (e.target as HTMLInputElement).checked }) }), 'Record my performances (webcam + game screen) — the video is offered on the results screen'),
+        h('div', { class: 'small mute', style: { margin: '6px 0 12px' } }, 'Recorded in the browser as WebM; nothing is uploaded. Play and practice modes only. Costs some CPU — use 720p on laptops.'),
+        field('Camera', h('div', { class: 'row' }, camSelect, button('DETECT', () => listCameras(true), 'icon small'), testBtn)),
+        camTest,
+        field('Camera position', select([{ value: 'pip', label: 'Small window, bottom-left' }, { value: 'column', label: 'Full-height column on the left' }], s.recordCamLayout, (v) => app.settingsStore.update({ recordCamLayout: v as 'pip' | 'column' }))),
+        field('Video size', select([{ value: '720', label: '1280 × 720 (recommended)' }, { value: '1080', label: '1920 × 1080' }], String(s.recordResolution), (v) => app.settingsStore.update({ recordResolution: Number(v) as 720 | 1080 }))),
+        h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordMic, onChange: (e: Event) => app.settingsStore.update({ recordMic: (e.target as HTMLInputElement).checked }) }), 'Also record the microphone (raw — picks up your pads, and whatever your speakers play)'),
+      ]
+    : [h('div', { class: 'small dim' }, 'This browser cannot record video (needs MediaRecorder, canvas capture and camera access). Try Chrome, Edge or Firefox.')];
+
   const el = h(
     'div',
     { class: 'screen' },
@@ -190,6 +245,8 @@ export function settingsScreen(app: App): Screen {
           h('h3', null, 'Keyboard fallback'),
           h('div', { class: 'small dim', style: { marginBottom: '10px' } }, 'No pads handy? Play with the keyboard. Click SET then press a key.'),
           keys,
+          h('h3', null, 'Performance video'),
+          ...videoPanel,
           h('h3', null, 'Data'),
           h('div', { class: 'btn-row' },
             button('EXPORT SCORES', () => downloadBlob(new Blob([app.scores.exportJson()], { type: 'application/json' }), 'drumkiller-scores.json')),
@@ -203,5 +260,5 @@ export function settingsScreen(app: App): Screen {
       ),
     ),
   );
-  return { el };
+  return { el, dispose: stopCamTest };
 }

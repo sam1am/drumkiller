@@ -37,6 +37,8 @@ export interface SessionCallbacks {
   onFinish?: (summary: ScoreSummary, recorded: PerformanceNote[]) => void;
   onTick?: (position: number, duration: number) => void;
   onCountdown?: (n: number | null) => void;
+  /** After each highway frame is drawn (used by the video recorder to composite). */
+  onFrame?: () => void;
 }
 
 /**
@@ -249,6 +251,7 @@ export class GameSession {
       accent: this.cfg.meta.accent,
     };
     this.renderer.draw(state);
+    this.cb.onFrame?.();
     this.cb.onTick?.(this.transport.position, this.audioDuration);
     if (!this.finished && !this.paused && this.cfg.mode !== 'record' && this.judge.finished && t > this.cfg.chart.duration && this.cfg.mode === 'play') {
       // Chart done: end a little early rather than waiting for a long outro.
