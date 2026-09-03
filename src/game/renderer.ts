@@ -84,7 +84,7 @@ interface Ripple {
 
 /** How long a hit ghost lingers (ms). Several stack up to show whether you're running early or late. */
 export const HIT_GHOST_LIFE_MS = 2600;
-const RIPPLE_LIFE_MS = 1800;
+const RIPPLE_LIFE_MS = 1400;
 
 /**
  * Canvas 2D pseudo-3D highway renderer. Independent of game logic; the session feeds it a RenderState each frame.
@@ -100,9 +100,15 @@ export class HighwayRenderer {
   private ripples: Ripple[] = [];
   private analyser: AnalyserNode | null = null;
   private freqData: Uint8Array<ArrayBuffer> | null = null;
-  /** Smoothed spectrum silhouette (0..1 per column) so the aurora breathes instead of flickering. */
+  private waveData: Uint8Array<ArrayBuffer> | null = null;
+  /** Smoothed spectrum (0..1 per column) so the visualiser breathes instead of flickering. */
   private spectrum: Float32Array = new Float32Array(0);
+  /** Smoothed time-domain waveform (−1..1) for the oscilloscope ring. */
+  private wave: Float32Array = new Float32Array(0);
   private bassLevel = 0;
+  private energy = 0;
+  private spin = 0;
+  private stars: { a: number; r: number; s: number; tw: number }[] = [];
   private shake = 0;
   private flashAlpha = 0;
   private lastFrame = performance.now();
@@ -176,6 +182,7 @@ export class HighwayRenderer {
   setAnalyser(analyser: AnalyserNode | null): void {
     this.analyser = analyser;
     this.freqData = analyser ? new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount)) : null;
+    this.waveData = analyser ? new Uint8Array(new ArrayBuffer(analyser.fftSize)) : null;
   }
 
   /**
@@ -190,8 +197,11 @@ export class HighwayRenderer {
   /** Background ripple for a drum hit (any mode). */
   drumPulse(voice: DrumVoice, velocity = 1): void {
     if (this.reduced) return;
-    this.ripples.push({ color: VOICE_COLORS[voice], t0: performance.now(), strength: 0.5 + 0.5 * Math.max(0, Math.min(1, velocity)) });
-    if (this.ripples.length > 24) this.ripples.splice(0, this.ripples.length - 24);
+    // Hi-hat and ride are busy: keep their rings faint so kicks, snares and crashes carry the pulse.
+    const lane = LANE_FOR_VOICE[voice];
+    const weight = lane === 'hihat' || lane === 'ride' ? 0.3 : lane === 'crash' ? 1.4 : 1;
+    this.ripples.push({ color: VOICE_COLORS[voice], t0: performance.now(), strength: weight * (0.5 + 0.5 * Math.max(0, Math.min(1, velocity))) });
+    if (this.ripples.length > 10) this.ripples.splice(0, this.ripples.length - 10);
   }
 
   hitFlash(voice: DrumVoice, judgement: Judgement | 'over'): void {
@@ -256,8 +266,7 @@ export class HighwayRenderer {
     bgGrad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = bgGrad;
     ctx.fillRect(0, 0, w, h);
-    this.drawAurora(accent);
-    this.drawRipples(now);
+    this.drawVisualiser(accent, now, dt);
 
     // shake
     if (this.shake > 0.1 && !this.reduced) {
@@ -614,21 +623,27 @@ export class HighwayRenderer {
   }
 
   // ── background visualiser ──
-  /** Pull a fresh spectrum from the analyser and ease the silhouette toward it. */
+  /** Pull a fresh spectrum + waveform from the analyser and ease the smoothed copies toward them. */
   private sampleAudio(dt: number, paused: boolean): void {
-    const cols = 96;
+    const cols = 72;
+    const wavePts = 256;
     if (this.spectrum.length !== cols) this.spectrum = new Float32Array(cols);
+    if (this.wave.length !== wavePts) this.wave = new Float32Array(wavePts);
     const decay = Math.pow(0.02, dt); // ~ -1 level in 1s when silent
-    if (!this.analyser || !this.freqData || this.reduced) {
+    if (!this.analyser || !this.freqData || !this.waveData || this.reduced || paused) {
       for (let i = 0; i < cols; i++) this.spectrum[i] *= decay;
+      for (let i = 0; i < wavePts; i++) this.wave[i] *= decay;
       this.bassLevel *= decay;
+      this.energy *= decay;
       return;
     }
     this.analyser.getByteFrequencyData(this.freqData);
+    this.analyser.getByteTimeDomainData(this.waveData);
     const bins = this.freqData.length;
     // Only the musically useful part of the spectrum (~20 Hz – 8 kHz at 48k / fftSize 1024 ≈ bins 1..170).
     const maxBin = Math.max(8, Math.min(bins - 1, Math.floor(bins * 0.35)));
     let bass = 0;
+    let sum = 0;
     for (let i = 0; i < cols; i++) {
       // log-spaced columns: more resolution for the lows, where the kick and snare live
       const f0 = Math.pow(i / cols, 1.7);
@@ -637,85 +652,183 @@ export class HighwayRenderer {
       const b1 = Math.max(b0 + 1, 1 + Math.ceil(f1 * (maxBin - 1)));
       let acc = 0;
       for (let b = b0; b < b1; b++) acc = Math.max(acc, this.freqData[b]);
-      const v = paused ? 0 : acc / 255;
+      const v = acc / 255;
       const cur = this.spectrum[i];
       // fast attack, slow release
       this.spectrum[i] = v > cur ? cur + (v - cur) * Math.min(1, dt * 18) : Math.max(v, cur * Math.pow(0.15, dt));
       if (i < cols * 0.15) bass = Math.max(bass, v);
+      sum += v;
     }
-    const bassTarget = paused ? 0 : Math.max(0, (bass - 0.45) / 0.55);
+    const step = this.waveData.length / wavePts;
+    const k = Math.min(1, dt * 30);
+    for (let i = 0; i < wavePts; i++) {
+      const v = (this.waveData[Math.floor(i * step)] - 128) / 128;
+      this.wave[i] += (v - this.wave[i]) * k;
+    }
+    const bassTarget = Math.max(0, (bass - 0.45) / 0.55);
     this.bassLevel = bassTarget > this.bassLevel ? this.bassLevel + (bassTarget - this.bassLevel) * Math.min(1, dt * 14) : this.bassLevel * Math.pow(0.05, dt);
+    const eTarget = sum / cols;
+    this.energy += (eTarget - this.energy) * Math.min(1, dt * 6);
   }
 
   /**
-   * A soft spectrum silhouette rising out of the horizon — mirrored left/right so it reads as an aurora
-   * behind the road rather than an EQ meter. Faint on purpose: it's ambience, not information.
+   * The background: a radial spectrum "sunburst" centred behind the road (two slowly counter-rotating
+   * layers, mirrored so it stays symmetrical), a circular oscilloscope of the live waveform, a bass-driven
+   * core, a star field that surges on the low end, and a ripple per drum hit. Everything sits behind the
+   * road and is kept translucent so the notes always win.
    */
-  private drawAurora(accent: string): void {
+  private drawVisualiser(accent: string, now: number, dt: number): void {
     const cols = this.spectrum.length;
     if (!cols) return;
-    let peak = 0;
-    for (let i = 0; i < cols; i++) if (this.spectrum[i] > peak) peak = this.spectrum[i];
-    if (peak < 0.02) return;
     const ctx = this.ctx;
-    const { w } = this;
-    const baseY = this.farY + 2;
-    const maxH = this.h * 0.17;
-    const half = w / 2;
-    // silhouette points from the centre outward: low frequencies in the middle, highs toward the edges
-    const sp = this.spectrum;
-    const yOf = (i: number) => {
-      // 3-tap smoothing across neighbouring columns so the silhouette rolls instead of spiking
-      const v = (sp[Math.max(0, i - 1)] + sp[i] * 2 + sp[Math.min(cols - 1, i + 1)]) / 4;
-      const curve = Math.pow(v, 1.8);
-      return baseY - curve * maxH * (1 - (i / cols) * 0.35);
-    };
-    ctx.save();
-    ctx.beginPath();
-    ctx.moveTo(0, baseY);
-    for (let i = cols - 1; i >= 0; i--) ctx.lineTo(this.cx - ((i + 0.5) / cols) * half, yOf(i));
-    for (let i = 0; i < cols; i++) ctx.lineTo(this.cx + ((i + 0.5) / cols) * half, yOf(i));
-    ctx.lineTo(w, baseY);
-    ctx.closePath();
-    const fill = ctx.createLinearGradient(0, baseY - maxH, 0, baseY);
-    fill.addColorStop(0, hexA(accent, 0));
-    fill.addColorStop(0.6, hexA(accent, 0.06));
-    fill.addColorStop(1, hexA(accent, 0.16));
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.strokeStyle = hexA(accent, 0.18);
-    ctx.lineWidth = 1.2;
-    ctx.shadowColor = accent;
-    ctx.shadowBlur = 12;
-    ctx.stroke();
-    ctx.shadowBlur = 0;
-    // reflection below the horizon: a fainter, squashed mirror that the road then sits on top of
-    ctx.globalAlpha = 0.35;
-    ctx.translate(0, baseY * 2);
-    ctx.scale(1, -0.45);
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.restore();
-  }
+    const cy = this.h * 0.5;
+    const cx = this.cx;
+    const R = Math.min(this.w, this.h) * 0.5; // outer reach: most of the background
+    const bass = this.bassLevel;
+    const energy = this.energy;
+    const accent2 = hexRotate(accent, 48);
+    const accent3 = hexRotate(accent, -36);
+    if (!this.reduced) this.spin += dt * (0.08 + bass * 0.5);
+    const spin = this.spin;
 
-  /** Concentric rings drifting out from the horizon for each drum hit, in the drum's colour, very faint. */
-  private drawRipples(now: number): void {
-    this.ripples = this.ripples.filter((r) => now - r.t0 < RIPPLE_LIFE_MS);
-    if (!this.ripples.length) return;
-    const ctx = this.ctx;
     ctx.save();
-    ctx.lineWidth = 1.5;
+
+    // ── star field: slow outward drift that surges with the low end ──
+    if (!this.reduced) {
+      if (!this.stars.length) for (let i = 0; i < 140; i++) this.stars.push({ a: Math.random() * Math.PI * 2, r: Math.random(), s: 0.4 + Math.random() * 0.6, tw: Math.random() * Math.PI * 2 });
+      const speed = 0.04 + bass * 0.5 + energy * 0.1;
+      for (const st of this.stars) {
+        st.r += dt * speed * st.s;
+        if (st.r > 1) {
+          st.r = 0.05 + Math.random() * 0.1;
+          st.a = Math.random() * Math.PI * 2;
+        }
+        const rr = st.r * st.r * R * 1.9 + R * 0.12;
+        const x = cx + Math.cos(st.a) * rr;
+        const y = cy + Math.sin(st.a) * rr * 0.72;
+        const tw = 0.5 + 0.5 * Math.sin(now / 900 + st.tw);
+        const a = (0.15 + st.r * 0.45) * tw * (0.5 + energy);
+        ctx.fillStyle = `rgba(255,255,255,${Math.min(0.7, a)})`;
+        const sz = 1 + st.r * 1.6 + bass * 1.5;
+        ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
+      }
+    }
+
+    // ── sunburst: two mirrored spectrum layers ──
+    const inner = R * (0.2 + bass * 0.06 + energy * 0.04);
+    const burst = (rot: number, color: string, gain: number, alpha: number, squash: number) => {
+      ctx.beginPath();
+      const n = cols;
+      // right half: top → bottom, then the mirrored left half bottom → top
+      const pt = (i: number, side: 1 | -1) => {
+        const idx = Math.max(0, Math.min(n - 1, i));
+        const v = (this.spectrum[Math.max(0, idx - 1)] + this.spectrum[idx] * 2 + this.spectrum[Math.min(n - 1, idx + 1)]) / 4;
+        const len = inner + Math.pow(v, 1.5) * (R - inner) * gain;
+        const ang = -Math.PI / 2 + ((idx + 0.5) / n) * Math.PI;
+        const a = side === 1 ? ang : Math.PI - ang;
+        const x = Math.cos(a + rot) * len;
+        const y = Math.sin(a + rot) * len * squash;
+        return [cx + x, cy + y] as const;
+      };
+      let [x0, y0] = pt(0, 1);
+      ctx.moveTo(x0, y0);
+      for (let i = 1; i < n; i++) {
+        const [x1, y1] = pt(i, 1);
+        ctx.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+        x0 = x1;
+        y0 = y1;
+      }
+      for (let i = n - 1; i >= 0; i--) {
+        const [x1, y1] = pt(i, -1);
+        ctx.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
+        x0 = x1;
+        y0 = y1;
+      }
+      ctx.closePath();
+      const g = ctx.createRadialGradient(cx, cy, inner * 0.6, cx, cy, R);
+      g.addColorStop(0, hexA(color, alpha * 0.9));
+      g.addColorStop(0.55, hexA(color, alpha * 0.35));
+      g.addColorStop(1, hexA(color, 0));
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.strokeStyle = hexA(color, alpha * 1.6);
+      ctx.lineWidth = 1.2;
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 18;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    };
+    ctx.globalCompositeOperation = 'lighter';
+    burst(spin * 0.35, accent2, 0.85, 0.11, 0.86);
+    burst(-spin * 0.5, accent3, 0.7, 0.09, 0.92);
+    burst(0, accent, 1, 0.2, 0.8);
+    // rays: a thin line from the core to every other spike tip of the main layer
+    ctx.lineWidth = 1;
+    for (let i = 0; i < cols; i += 2) {
+      const v = this.spectrum[i];
+      if (v < 0.08) continue;
+      const len = inner + Math.pow(v, 1.5) * (R - inner);
+      const ang = -Math.PI / 2 + ((i + 0.5) / cols) * Math.PI;
+      ctx.strokeStyle = hexA(accent, 0.05 + v * 0.22);
+      for (const a of [ang, Math.PI - ang]) {
+        ctx.beginPath();
+        ctx.moveTo(cx + Math.cos(a) * inner * 0.9, cy + Math.sin(a) * inner * 0.9 * 0.8);
+        ctx.lineTo(cx + Math.cos(a) * len, cy + Math.sin(a) * len * 0.8);
+        ctx.stroke();
+      }
+    }
+
+    // ── oscilloscope ring: the live waveform wrapped around the core ──
+    const pts = this.wave.length;
+    if (pts) {
+      const ringR = inner * 1.05;
+      const amp = R * (0.05 + bass * 0.04);
+      ctx.beginPath();
+      for (let i = 0; i <= pts; i++) {
+        const v = this.wave[i % pts];
+        const a = (i / pts) * Math.PI * 2 - Math.PI / 2 + spin * 0.1;
+        const rr = ringR + v * amp;
+        const x = cx + Math.cos(a) * rr;
+        const y = cy + Math.sin(a) * rr * 0.8;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.strokeStyle = `rgba(255,255,255,${0.16 + energy * 0.3})`;
+      ctx.lineWidth = 1.4;
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur = 10;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // ── core: a soft bass-lit orb ──
+    const coreR = inner * (0.8 + bass * 0.25);
+    const core = ctx.createRadialGradient(cx, cy, 0, cx, cy, coreR);
+    core.addColorStop(0, hexA('#ffffff', 0.08 + bass * 0.18));
+    core.addColorStop(0.35, hexA(accent, 0.12 + bass * 0.2));
+    core.addColorStop(1, hexA(accent, 0));
+    ctx.fillStyle = core;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, coreR, coreR * 0.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ── ripples: one ring per drum hit, in the drum's colour, spreading from the centre ──
+    this.ripples = this.ripples.filter((r) => now - r.t0 < RIPPLE_LIFE_MS);
+    ctx.lineWidth = 2;
     for (const r of this.ripples) {
       const p = (now - r.t0) / RIPPLE_LIFE_MS;
-      const ease = 1 - Math.pow(1 - p, 2.2);
-      const rx = 40 + ease * this.w * 0.7;
-      const ry = 12 + ease * this.h * 0.55;
-      const alpha = (1 - p) * (1 - p) * 0.12 * r.strength;
+      const ease = 1 - Math.pow(1 - p, 2.4);
+      const rr = inner + ease * R * 1.5;
+      const alpha = (1 - p) * (1 - p) * 0.18 * r.strength;
       ctx.strokeStyle = hexA(r.color, alpha);
+      ctx.shadowColor = r.color;
+      ctx.shadowBlur = 12 * (1 - p);
       ctx.beginPath();
-      ctx.ellipse(this.cx, this.farY, rx, ry, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, rr, rr * 0.8, 0, 0, Math.PI * 2);
       ctx.stroke();
     }
+    ctx.shadowBlur = 0;
     ctx.restore();
   }
 
@@ -818,4 +931,41 @@ export function hexA(hex: string, a: number): string {
   const g = (n >> 8) & 255;
   const b = n & 255;
   return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, a))})`;
+}
+
+/** Rotate a '#rrggbb' colour's hue by `deg` degrees (keeps saturation/lightness). */
+export function hexRotate(hex: string, deg: number): string {
+  if (!hex.startsWith('#') || hex.length < 7) return hex;
+  const n = parseInt(hex.slice(1, 7), 16);
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  let h = 0;
+  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+  h = (h + deg + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let rr = 0;
+  let gg = 0;
+  let bb = 0;
+  if (h < 60) [rr, gg, bb] = [c, x, 0];
+  else if (h < 120) [rr, gg, bb] = [x, c, 0];
+  else if (h < 180) [rr, gg, bb] = [0, c, x];
+  else if (h < 240) [rr, gg, bb] = [0, x, c];
+  else if (h < 300) [rr, gg, bb] = [x, 0, c];
+  else [rr, gg, bb] = [c, 0, x];
+  const to = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${to(rr)}${to(gg)}${to(bb)}`;
 }
