@@ -694,6 +694,8 @@ export class HighwayRenderer {
     const spin = this.spin;
 
     ctx.save();
+    // Whole visualiser at half strength: it is ambience behind the road, not something to look at.
+    ctx.globalAlpha = 0.5;
 
     // ── star field: slow outward drift that surges with the low end ──
     if (!this.reduced) {
