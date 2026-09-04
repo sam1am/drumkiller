@@ -264,8 +264,13 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     await setupRecorder();
     loading.remove();
     if (mode === 'practice') buildPracticeBar();
-    await recorder?.start();
-    await session.start(mode === 'record' ? studioState.countInBars * (60 / pkg.meta.bpm) * 4 : 3);
+    const countIn = mode === 'record' ? studioState.countInBars * (60 / pkg.meta.bpm) * 4 : 3;
+    if (recorder) {
+      // Prime the highway so the recording's first frame (the preview's poster) shows the road.
+      session.drawFrame(countIn);
+      await recorder.start();
+    }
+    await session.start(countIn);
   }
 
   const onResizeWave = () => wave?.resize();

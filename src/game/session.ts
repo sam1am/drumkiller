@@ -253,6 +253,17 @@ export class GameSession {
     }
   }
 
+  /**
+   * Draw one highway frame at a chart time without running the session — used to prime the canvas
+   * before the video recorder starts, so the recording's first frame (and the preview's poster)
+   * shows the road rather than an empty canvas. Defaults to where a count-in of `countInSeconds`
+   * would begin.
+   */
+  drawFrame(countInSeconds = 3): void {
+    const from = this.cfg.loop ? this.cfg.loop.start - 1.5 : -countInSeconds - this.cfg.meta.offset;
+    this.render(from);
+  }
+
   private loop = (): void => {
     if (!this.running) return;
     this.raf = requestAnimationFrame(this.loop);
@@ -263,6 +274,15 @@ export class GameSession {
         this.seek(this.cfg.loop.start);
       }
     }
+    this.render(t);
+    this.cb.onTick?.(this.transport.position, this.audioDuration);
+    if (!this.finished && !this.paused && this.cfg.mode !== 'record' && this.judge.finished && t > this.cfg.chart.duration && this.cfg.mode === 'play') {
+      // Chart done: end a little early rather than waiting for a long outro.
+      if (t > this.duration - 0.5 || t > this.cfg.chart.duration + 4) this.finish();
+    }
+  };
+
+  private render(t: number): void {
     const state: RenderState = {
       time: t,
       window: this.cfg.scrollWindow * (this.cfg.mode === 'practice' ? 1 : 1),
@@ -277,12 +297,7 @@ export class GameSession {
     };
     this.renderer.draw(state);
     this.cb.onFrame?.();
-    this.cb.onTick?.(this.transport.position, this.audioDuration);
-    if (!this.finished && !this.paused && this.cfg.mode !== 'record' && this.judge.finished && t > this.cfg.chart.duration && this.cfg.mode === 'play') {
-      // Chart done: end a little early rather than waiting for a long outro.
-      if (t > this.duration - 0.5 || t > this.cfg.chart.duration + 4) this.finish();
-    }
-  };
+  }
 
   /** End the session now with whatever has been played/recorded (used by 'finish take'). */
   finishNow(): void {
