@@ -24,7 +24,7 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
   async function refresh(): Promise<void> {
     entries = await app.library.listAll();
     clear(list);
-    if (!entries.length) list.appendChild(h('div', { class: 'dim' }, 'No songs yet. Import a song zip or make one in the Studio.'));
+    if (!entries.length) list.appendChild(h('div', { class: 'dim' }, 'No songs yet. Import a song zip or create one in the Studio.'));
     for (const e of entries) {
       const art = h('div', { class: 'art' });
       if (e.artworkUrl) art.style.backgroundImage = `url("${e.artworkUrl}")`;
@@ -137,7 +137,6 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
       practice ? h('div', { class: 'hint-box' }, 'Practice mode: adjust speed, loop sections, hear guide drums. Scores are not saved.') : lb,
       h('div', { class: 'btn-row', style: { marginTop: '20px' } },
         button(practice ? 'PRACTICE' : 'PLAY', () => play(e), 'primary big'),
-        button('EDIT CHART', () => edit(e)),
         e.source !== 'bundled' ? button('REMOVE', () => remove(e), 'danger') : null,
       ),
     );
@@ -154,17 +153,6 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
     }
   }
 
-  async function edit(e: SongListEntry): Promise<void> {
-    stopPreview();
-    await app.boot();
-    try {
-      const pkg = await app.library.load(e);
-      app.navigate('editor', { pkg, difficulty });
-    } catch (err) {
-      toast(`Could not load song: ${(err as Error).message}`, 'bad');
-    }
-  }
-
   async function remove(e: SongListEntry): Promise<void> {
     if (!confirm(`Remove "${e.meta.title}" from your library? High scores are kept.`)) return;
     await app.library.remove(e.meta.id);
@@ -176,7 +164,7 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
 
   async function importPkg(pkg: SongPackage): Promise<void> {
     if (!availableDifficulties(pkg).length) {
-      toast('That song has no chart MIDI files (expert.mid etc). Record one in the Studio.', 'bad');
+      toast('That song has no chart MIDI files (expert.mid etc). Open it in the Studio to record or draw one.', 'bad');
     }
     await app.library.import(pkg);
     toast(`Imported "${pkg.meta.title}"`, 'ok');

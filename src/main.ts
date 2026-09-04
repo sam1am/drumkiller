@@ -7,7 +7,6 @@ import { resultsScreen } from './ui/results';
 import { wizardScreen } from './ui/wizard';
 import { settingsScreen } from './ui/settings';
 import { studioScreen } from './ui/studio';
-import { editorScreen } from './ui/editor';
 
 const root = document.getElementById('app')!;
 root.appendChild(h('div', { class: 'backdrop' }));
@@ -20,7 +19,6 @@ app.register('results', resultsScreen);
 app.register('wizard', wizardScreen);
 app.register('settings', settingsScreen);
 app.register('studio', studioScreen);
-app.register('editor', editorScreen);
 
 // Deep-linkable top-level screens (game/results need params, so they fall back to title).
 const initial = location.hash.replace('#', '');

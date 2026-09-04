@@ -1,15 +1,12 @@
-import type { App, Screen } from '@/app';
+import type { App } from '@/app';
 import { DIFFICULTIES, VOICE_LABELS, type Chart, type Difficulty, type DrumVoice, type QuantizeGrid, type SongPackage } from '@/types';
 import { chartToMidi, writeMidi, performanceToChart, gridStepTicks, secondsToTicks, ticksToSeconds, QUANTIZE_GRIDS, chartStats, difficultyRating } from '@/midi';
-import { exportSongZip, slugify } from '@/song';
 import { Transport, ChartPlayer } from '@/audio';
-import { h, button, toast, clear, downloadBlob, select, fmtTime } from './dom';
-import { topbar } from './topbar';
+import { h, button, toast, select, fmtTime } from './dom';
 import { VOICE_COLORS, type BeatMark } from '@/game/renderer';
 import { VOICE_ORDER_FOR_UI, computeBeats } from '@/game/session';
 import { computeEnvelope } from '@/game/waveform';
-import { loadChart, applySongKit } from './game';
-import { studioState } from './studioState';
+import { loadChart } from './game';
 
 interface EditNote {
   id: number;
@@ -40,21 +37,45 @@ function midiBytes(u8: Uint8Array): ArrayBuffer {
   return ab;
 }
 
+export interface ChartEditorOptions {
+  /** The studio's working copy. `flush()` writes the edited chart back into it as `<difficulty>.mid`. */
+  pkg: SongPackage;
+  /** Decoded song audio (the studio already has it). */
+  audio: AudioBuffer;
+  difficulty: Difficulty;
+  /** Called on every edit so the owner can mark the song as having unsaved changes. */
+  onChange: () => void;
+  /** Called when the user switches which difficulty is being edited. */
+  onDifficulty?: (d: Difficulty) => void;
+  /** ⌘S. */
+  onSave?: () => void;
+  /** Extra buttons for the editor footer (export, …). */
+  actions?: HTMLElement[];
+}
+
+export interface ChartEditor {
+  el: HTMLElement;
+  readonly difficulty: Difficulty;
+  /** True while there are edits not yet written into the package. */
+  readonly dirty: boolean;
+  /** Current notes as a chart. */
+  toChart(): Chart;
+  /** Write the edited chart into the package (as `<difficulty>.mid`). Returns whether anything was written. */
+  flush(): boolean;
+  dispose(): void;
+}
+
 /**
- * CHART EDITOR — piano-roll for drum charts. One row per drum voice, time left→right over the
- * song waveform and beat grid. Click to add, drag to move, marquee to select, Delete to remove,
- * undo/redo, snap grid, velocity, transport playback with the drum kit, pad input while playing.
+ * CHART EDITOR — piano-roll for drum charts, mounted inside the studio. One row per drum voice, time
+ * left→right over the song waveform and beat grid. Click to add, drag to move, marquee to select,
+ * Delete to remove, undo/redo, snap grid, velocity, transport playback with the drum kit, pad input
+ * while playing. Edits are written into the studio's working copy via `flush()`; the studio saves.
  */
-export async function editorScreen(app: App, params?: Record<string, unknown>): Promise<Screen> {
-  const pkg = params?.pkg as SongPackage;
-  let difficulty = (params?.difficulty as Difficulty) ?? 'expert';
-  await app.boot();
+export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<ChartEditor> {
+  const { pkg, audio } = opts;
+  let difficulty = opts.difficulty;
 
   // ── data ──
-  const audioBlob = pkg.files.get(pkg.meta.audio);
-  if (!audioBlob) throw new Error(`Audio file "${pkg.meta.audio}" missing`);
-  const audio = await app.engine.decode(await audioBlob.arrayBuffer());
-  await applySongKit(app, pkg);
   let base: Chart;
   let notes: EditNote[] = [];
   let nextId = 1;
@@ -136,6 +157,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     if (undo.length > 200) undo.shift();
     redo.length = 0;
     dirty = true;
+    opts.onChange();
   };
   const restore = (from: EditNote[][], to: EditNote[][]): void => {
     const snap = from.pop();
@@ -144,6 +166,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     notes = snap.map((n) => ({ ...n }));
     selected.clear();
     dirty = true;
+    opts.onChange();
     player.setNotes(notes);
     updateStatus();
     draw();
@@ -624,7 +647,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
       draw();
     } else if (meta && e.code === 'KeyS') {
       e.preventDefault();
-      void save();
+      opts.onSave?.();
     } else if (meta && e.code === 'KeyD') {
       e.preventDefault();
       duplicateSelected();
@@ -730,7 +753,7 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     commit();
   });
 
-  // ── save / export ──
+  // ── write back ──
   function toChart(): Chart {
     const c = performanceToChart(
       notes.map((n) => ({ time: n.time, voice: n.voice, velocity: n.velocity })),
@@ -741,23 +764,17 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     c.duration = Math.max(c.duration, chartDuration);
     return c;
   }
-  function packageWithChart(): SongPackage {
-    const out: SongPackage = { ...pkg, files: new Map(pkg.files), meta: { ...pkg.meta, charts: { ...pkg.meta.charts } } };
-    out.meta.id = out.meta.id || slugify(`${out.meta.title}-${out.meta.artist}`);
-    const midi = writeMidi(chartToMidi(toChart(), { trackName: `${out.meta.title} — ${difficulty}` }));
-    out.files.set(`${difficulty}.mid`, new Blob([midiBytes(midi)], { type: 'audio/midi' }));
-    out.meta.charts[difficulty] = `${difficulty}.mid`;
-    return out;
-  }
-  async function save(): Promise<void> {
-    const out = packageWithChart();
-    await app.library.import(out);
-    Object.assign(pkg, { files: out.files, meta: out.meta, source: 'library' });
-    if (studioState.pkg && studioState.pkg.meta.id === out.meta.id) studioState.pkg = pkg;
+  /** Write the edited chart into the package as `<difficulty>.mid` (a derived chart becomes a real one). */
+  function flush(): boolean {
+    if (!dirty) return false;
+    const midi = writeMidi(chartToMidi(toChart(), { trackName: `${pkg.meta.title} — ${difficulty}` }));
+    pkg.files.set(`${difficulty}.mid`, new Blob([midiBytes(midi)], { type: 'audio/midi' }));
+    pkg.meta.charts[difficulty] = `${difficulty}.mid`;
     dirty = false;
     derived = false;
+    refreshDiffLabels();
     updateStatus();
-    toast(`Saved ${difficulty}.mid (${notes.length} notes) to "${out.meta.title}" in your library`, 'ok');
+    return true;
   }
 
   // ── toolbar ──
@@ -768,20 +785,20 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   const status = h('span', { class: 'mono small dim' });
   const updateStatus = () => {
     const st = chartStats(toChart());
-    status.textContent = `${notes.length} notes · ${st.notesPerSecond.toFixed(1)} nps · ${difficultyRating(toChart())}/10${derived ? ' · AUTO (unsaved derivation)' : ''}${dirty ? ' · UNSAVED' : ''}`;
-    titleEl.textContent = `${pkg.meta.title} — ${difficulty.toUpperCase()}${dirty ? ' *' : ''}`;
+    status.textContent = `${difficulty.toUpperCase()} · ${notes.length} notes · ${st.notesPerSecond.toFixed(1)} nps · ${difficultyRating(toChart())}/10${derived ? ' · AUTO-GENERATED (edit to make it a real chart)' : ''}`;
   };
-  const titleEl = h('span');
   let velocityForNew = 0.9;
   const velSlider = h('input', { class: 'input', type: 'range', min: 0.05, max: 1, step: 0.01, value: velocityForNew, style: { width: '110px' }, onInput: (e: Event) => { velocityForNew = Number((e.target as HTMLInputElement).value); setSelectedVelocity(velocityForNew); } });
-  const diffSel = select(DIFFICULTIES.map((d) => ({ value: d, label: `${d.toUpperCase()}${pkg.meta.charts?.[d] ? '' : ' (auto)'}` })), difficulty, async (v) => {
-    if (dirty && !confirm('Discard unsaved changes to this difficulty?')) {
-      diffSel.value = difficulty;
-      return;
-    }
+  const diffLabel = (d: Difficulty) => `${d.toUpperCase()}${pkg.meta.charts?.[d] ? '' : ' (auto)'}`;
+  const diffSel = select(DIFFICULTIES.map((d) => ({ value: d, label: diffLabel(d) })), difficulty, async (v) => {
+    flush(); // edits to the difficulty we are leaving stay in the working copy
     await loadDifficulty(v as Difficulty);
+    opts.onDifficulty?.(difficulty);
     draw();
   });
+  const refreshDiffLabels = () => {
+    Array.from(diffSel.options).forEach((o) => { o.textContent = diffLabel(o.value as Difficulty); });
+  };
   const gridSel = select(QUANTIZE_GRIDS.map((g) => ({ value: g.id, label: g.id === 'off' ? 'Snap: off' : `Snap: ${g.label}` })), grid, (v) => { grid = v as QuantizeGrid; draw(); });
   const followBtn = button('FOLLOW: ON', () => { setFollow(!follow); if (follow) { pinPlayhead(chartTime()); draw(); } }, 'icon small');
   const padBtn = button('PADS ADD NOTES: ON', () => { padInput = !padInput; padBtn.textContent = `PADS ADD NOTES: ${padInput ? 'ON' : 'OFF'}`; }, 'icon small');
@@ -803,23 +820,14 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
     followBtn,
     padBtn,
   );
-  const footer = h('div', { class: 'editor-footer' },
-    status,
-    h('span', { class: 'spacer' }),
-    button('SAVE TO LIBRARY', save, 'primary'),
-    button('EXPORT MIDI', () => downloadBlob(new Blob([midiBytes(writeMidi(chartToMidi(toChart(), { trackName: pkg.meta.title })))], { type: 'audio/midi' }), `${slugify(pkg.meta.title)}-${difficulty}.mid`)),
-    button('DOWNLOAD SONG ZIP', async () => downloadBlob(await exportSongZip(packageWithChart()), `${pkg.meta.id}.zip`)),
-    button('PLAY IT', async () => { await save(); app.navigate('game', { pkg, difficulty, mode: 'play' }); }),
-  );
+  const footer = h('div', { class: 'editor-footer' }, status, h('span', { class: 'spacer' }), ...(opts.actions ?? []));
   const help = h('div', { class: 'small mute editor-help' },
     'Click empty space = add note (drops the old selection) · drag a note sideways = move, up/down = velocity · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
     h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing',
   );
 
-  const el = h('div', { class: 'screen' },
-    topbar(app, 'CHART EDITOR', h('span', { class: 'pill' }, titleEl), button('BACK', () => { if (!dirty || confirm('Discard unsaved changes?')) app.navigate(params?.back === 'studio' ? 'studio' : 'songs'); }, 'ghost')),
-    h('div', { class: 'screen-body', style: { padding: '14px 24px 20px', display: 'flex', flexDirection: 'column', gap: '10px' } }, toolbar, h('div', { class: 'editor-wrap' }, canvas), footer, help),
-  );
+  const wrap = h('div', { class: 'editor-wrap' }, canvas);
+  const el = h('div', { class: 'chart-editor' }, toolbar, wrap, footer, help);
 
   await loadDifficulty(difficulty);
   canvas.addEventListener('pointerdown', onPointerDown);
@@ -829,7 +837,8 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   canvas.addEventListener('wheel', onWheel, { passive: false });
   window.addEventListener('keydown', onKey);
   window.addEventListener('resize', resize);
-  new ResizeObserver(resize).observe(el.querySelector('.editor-wrap')!);
+  const ro = new ResizeObserver(resize);
+  ro.observe(wrap);
   let raf = 0;
   const tick = () => {
     if (transport.playing) draw();
@@ -837,18 +846,24 @@ export async function editorScreen(app: App, params?: Record<string, unknown>): 
   };
   tick();
   app.input.keyboard.setEnabled(false); // editor owns the keyboard
-  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get selected() { return selected; }, toChart, save, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; } };
+  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; } };
 
   return {
     el,
+    get difficulty() { return difficulty; },
+    get dirty() { return dirty; },
+    toChart,
+    flush,
     dispose: () => {
       cancelAnimationFrame(raf);
+      ro.disconnect();
       transport.stop();
       player.stop();
       unsubHits();
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('resize', resize);
       app.input.keyboard.setEnabled(true);
+      if ((window as unknown as { dkEditor: unknown }).dkEditor) delete (window as unknown as { dkEditor?: unknown }).dkEditor;
     },
   };
 }

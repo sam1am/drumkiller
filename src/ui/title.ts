@@ -49,7 +49,7 @@ export function titleScreen(app: App): Screen {
           { class: 'menu' },
           menuItem('PLAY', 'pick a song, chase the high score', 'songs', 'primary'),
           menuItem('PRACTICE', 'slow it down, loop sections, no pressure', 'songs-practice'),
-          menuItem('STUDIO', 'record a performance → MIDI chart → song folder', 'studio'),
+          menuItem('STUDIO', 'create or edit songs: tempo, samples, record takes, edit charts', 'studio'),
           menuItem('PAD SETUP', 'assign your pads to each drum, per device', 'wizard'),
           menuItem('SETTINGS', 'latency, volumes, keys', 'settings'),
         ),

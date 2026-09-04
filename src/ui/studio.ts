@@ -1,14 +1,15 @@
 import type { App, Screen } from '@/app';
 import { DIFFICULTIES, DRUM_VOICES, VOICE_LABELS, type Chart, type Difficulty, type DrumVoice, type QuantizeOptions, type SongListEntry, type SongPackage } from '@/types';
-import { chartToMidi, writeMidi, performanceToChart, quantizePerformance, QUANTIZE_GRIDS, constantTempoMap, DEFAULT_PPQ, chartStats, difficultyRating, parseMidi, chartFromMidi, deriveDifficulty } from '@/midi';
-import { createSongPackage, exportSongZip, slugify, getChartBlob, hardestAvailable, availableDifficulties } from '@/song';
+import { chartToMidi, writeMidi, performanceToChart, quantizePerformance, QUANTIZE_GRIDS, constantTempoMap, DEFAULT_PPQ, chartStats, difficultyRating, deriveDifficulty } from '@/midi';
+import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS } from '@/song';
 import { Transport, ChartPlayer, Metronome } from '@/audio';
-import { h, button, field, toast, clear, downloadBlob, pickFile, select, fmtTime } from './dom';
+import { h, button, field, toast, clear, downloadBlob, pickFile, select, fmtTime, modal } from './dom';
 import { topbar } from './topbar';
-import { studioState } from './studioState';
+import { studioState, type StudioTab } from './studioState';
 import { VOICE_COLORS } from '@/game/renderer';
 import { applySongKit } from './game';
 import { offsetPicker, type OffsetPicker } from './offsetPicker';
+import { chartEditor, type ChartEditor } from './chartEditor';
 
 /** Copy into a plain ArrayBuffer so Blob typing is happy. */
 function midiBytes(u8: Uint8Array): ArrayBuffer {
@@ -17,29 +18,42 @@ function midiBytes(u8: Uint8Array): ArrayBuffer {
   return ab;
 }
 
-type Step = 'source' | 'details' | 'record' | 'quantize' | 'save';
-const STEPS: { id: Step; label: string }[] = [
-  { id: 'source', label: '1 · Audio' },
-  { id: 'details', label: '2 · Tempo & offset' },
-  { id: 'record', label: '3 · Record' },
-  { id: 'quantize', label: '4 · Quantize' },
-  { id: 'save', label: '5 · Save & share' },
+function midiBlob(chart: Chart, trackName: string): Blob {
+  return new Blob([midiBytes(writeMidi(chartToMidi(chart, { trackName })))], { type: 'audio/midi' });
+}
+
+const TABS: { id: StudioTab; label: string; hint: string }[] = [
+  { id: 'song', label: 'SONG', hint: 'details · tempo & offset · samples' },
+  { id: 'record', label: 'RECORD', hint: 'play a take on your pads' },
+  { id: 'chart', label: 'CHART', hint: 'edit the notes' },
 ];
 
+// A reload would throw away unsaved studio work.
+window.addEventListener('beforeunload', (e) => {
+  if (studioState.dirty) e.preventDefault();
+});
+
 /**
- * STUDIO: build a song folder from an audio file — set tempo/offset, record a drum performance,
- * quantize it, save as a difficulty chart, export MIDI / zip, add to the library.
+ * STUDIO: the song editor. Create a song from an audio file or open one from the library, then work on
+ * it in three tabs — SONG (details, tempo/offset, custom samples), RECORD (capture a take on the pads
+ * and quantize it into a chart) and CHART (piano-roll note editor). Everything edits one in-memory
+ * working copy; SAVE writes it to the library, SAVE AS saves a copy under a new title.
  */
 export function studioScreen(app: App, params?: Record<string, unknown>): Screen {
-  let step: Step = (params?.step as Step) ?? (studioState.pkg ? 'details' : 'source');
-  const body = h('div');
-  const stepsEl = h('div', { class: 'steps' });
+  if (params?.tab) studioState.tab = params.tab as StudioTab;
+  const body = h('div', { class: 'studio-wrap' });
+  const actions = h('div', { class: 'row', style: { gap: '8px' } });
   let transport: Transport | null = null;
   let player: ChartPlayer | null = null;
   let metro: Metronome | null = null;
-  let quant: QuantizeOptions = { grid: '1/16', strength: 1, swing: 0, dedupeWindow: 0.03 };
   let picker: OffsetPicker | null = null;
+  let editor: ChartEditor | null = null;
+  let editorToken = 0;
+  let quant: QuantizeOptions = { grid: '1/16', strength: 1, swing: 0, dedupeWindow: 0.03 };
   let quantized: Chart | null = null;
+  let deriveEasier = true;
+  /** RECORD tab: show the recording setup even though a take is pending. */
+  let recordSetup = false;
 
   studioState.chartForRecording = (pkg) => baseChart(pkg);
 
@@ -57,49 +71,44 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     transport = null;
   }
 
-  function renderSteps(): void {
-    clear(stepsEl);
-    const idx = STEPS.findIndex((s) => s.id === step);
-    STEPS.forEach((s, i) => stepsEl.appendChild(h('div', { class: `step ${i === idx ? 'active' : i < idx ? 'done' : ''}`, onClick: () => { if (i < idx || (studioState.pkg && i <= idx + 1)) go(s.id); } }, s.label)));
+  /** Write pending chart edits into the working copy and tear the editor down. */
+  function closeEditor(): void {
+    editorToken++;
+    if (!editor) return;
+    editor.flush();
+    editor.dispose();
+    editor = null;
   }
 
-  function go(next: Step): void {
+  function markDirty(): void {
+    if (studioState.dirty) return;
+    studioState.dirty = true;
+    renderActions();
+  }
+
+  /** Put `chart` into the working copy as `<difficulty>.mid`. */
+  function setChart(d: Difficulty, chart: Chart, auto = false): void {
+    const pkg = studioState.pkg!;
+    pkg.files.set(`${d}.mid`, midiBlob(chart, `${pkg.meta.title} — ${d}${auto ? ' (auto)' : ''}`));
+    pkg.meta.charts[d] = `${d}.mid`;
+    markDirty();
+  }
+
+  // ─── open / new ───
+  async function openPackage(pkg: SongPackage, buf: AudioBuffer, savedId: string | null): Promise<void> {
     stopPreview();
-    step = next;
+    closeEditor();
+    studioState.reset();
+    studioState.pkg = pkg;
+    studioState.audioBuffer = buf;
+    studioState.savedId = savedId;
+    studioState.dirty = savedId === null;
+    studioState.targetDifficulty = 'expert';
+    applySongKit(app, pkg).catch((err) => console.warn('kit load failed', err));
     render();
   }
 
-  function render(): void {
-    renderSteps();
-    clear(body);
-    switch (step) {
-      case 'source': return renderSource();
-      case 'details': return renderDetails();
-      case 'record': return renderRecord();
-      case 'quantize': return renderQuantize();
-      case 'save': return renderSave();
-    }
-  }
-
-  // ─── 1. SOURCE ───
-  function renderSource(): void {
-    const libList = h('div', { class: 'btn-row' });
-    app.library.listAll().then((entries) => {
-      if (!entries.length) libList.appendChild(h('span', { class: 'mute' }, 'Library is empty.'));
-      for (const e of entries) libList.appendChild(button(`${e.meta.title}`, () => useExisting(e)));
-    });
-    body.append(
-      h('div', { class: 'panel' },
-        h('h2', { class: 'display' }, 'NEW SONG'),
-        h('div', { class: 'dim' }, 'Start from an audio file: a full mix WITHOUT drums (mp3, wav, flac, aac, m4a, ogg). You will record the drum part on your pads; the game plays your samples on top.'),
-        h('div', { class: 'btn-row', style: { marginTop: '16px' } }, button('CHOOSE AUDIO FILE', chooseAudio, 'primary big')),
-        h('h3', null, 'Or re-chart an existing song'),
-        libList,
-      ),
-    );
-  }
-
-  async function chooseAudio(): Promise<void> {
+  async function newFromAudio(): Promise<void> {
     const [file] = await pickFile('audio/*,.mp3,.wav,.flac,.aac,.m4a,.ogg');
     if (!file) return;
     await app.boot();
@@ -107,36 +116,193 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       const buf = await app.engine.decode(await file.arrayBuffer());
       const name = file.name.replace(/\.[^.]+$/, '');
       const ext = (file.name.split('.').pop() ?? 'mp3').toLowerCase();
-      studioState.reset();
-      studioState.audioBuffer = buf;
-      studioState.pkg = createSongPackage({ meta: { title: name, artist: 'Unknown Artist', bpm: 120, offset: 0, length: buf.duration, charter: app.settings.playerName }, audio: file, audioFileName: `audio.${ext}` });
-      toast(`Loaded ${file.name} (${fmtTime(buf.duration)})`, 'ok');
-      go('details');
+      const pkg = createSongPackage({ meta: { title: name, artist: 'Unknown Artist', bpm: 120, offset: 0, length: buf.duration, charter: app.settings.playerName }, audio: file, audioFileName: `audio.${ext}` });
+      toast(`Loaded ${file.name} (${fmtTime(buf.duration)}) — set the tempo and offset, then record or draw a chart`, 'ok', 4000);
+      await openPackage(pkg, buf, null);
     } catch (err) {
       toast(`Could not decode audio: ${(err as Error).message}`, 'bad');
     }
   }
 
-  async function useExisting(e: SongListEntry): Promise<void> {
+  async function openExisting(e: SongListEntry): Promise<void> {
     await app.boot();
-    const pkg = await app.library.load(e);
-    const audioBlob = pkg.files.get(pkg.meta.audio);
-    if (!audioBlob) return toast('Song has no audio', 'bad');
-    studioState.reset();
-    studioState.audioBuffer = await app.engine.decode(await audioBlob.arrayBuffer());
-    studioState.pkg = { ...pkg, files: new Map(pkg.files), source: 'folder' };
-    go('details');
+    try {
+      const loaded = await app.library.load(e);
+      const audioBlob = loaded.files.get(loaded.meta.audio);
+      if (!audioBlob) return toast('Song has no audio', 'bad');
+      const buf = await app.engine.decode(await audioBlob.arrayBuffer());
+      const pkg: SongPackage = { ...loaded, files: new Map(loaded.files), meta: { ...loaded.meta, charts: { ...loaded.meta.charts }, samples: loaded.meta.samples ? { ...loaded.meta.samples } : undefined } };
+      await openPackage(pkg, buf, e.meta.id);
+    } catch (err) {
+      toast(`Could not open song: ${(err as Error).message}`, 'bad');
+    }
   }
 
-  // ─── 2. DETAILS ───
-  function renderDetails(): void {
+  function close(): void {
+    const pkg = studioState.pkg;
+    if (!pkg) return;
+    if (studioState.dirty && !confirm(`Close "${pkg.meta.title}" without saving? Your changes will be lost.`)) return;
+    stopPreview();
+    closeEditor();
+    studioState.reset();
+    render();
+  }
+
+  // ─── save ───
+  /** An id no other song in the library uses. */
+  async function uniqueId(base: string): Promise<string> {
+    const ids = new Set((await app.library.listAll()).map((x) => x.meta.id));
+    const root = base || 'song';
+    let id = root;
+    for (let n = 2; ids.has(id); n++) id = `${root}-${n}`;
+    return id;
+  }
+
+  async function save(): Promise<boolean> {
+    const pkg = studioState.pkg;
+    if (!pkg) return false;
+    editor?.flush();
+    if (!pkg.meta.title.trim()) {
+      toast('Give the song a title first', 'bad');
+      return false;
+    }
+    pkg.meta.length = studioState.audioBuffer!.duration;
+    if (!studioState.savedId) pkg.meta.id = await uniqueId(slugify(`${pkg.meta.title} ${pkg.meta.artist}`));
+    await app.library.import(pkg);
+    pkg.source = 'library';
+    studioState.savedId = pkg.meta.id;
+    studioState.dirty = false;
+    renderActions();
+    toast(`Saved "${pkg.meta.title}"`, 'ok');
+    return true;
+  }
+
+  function saveAs(): void {
+    const pkg = studioState.pkg;
+    if (!pkg) return;
+    editor?.flush();
+    const titleIn = h('input', { class: 'input', value: studioState.savedId ? `${pkg.meta.title} (copy)` : pkg.meta.title });
+    const confirmSave = async () => {
+      const t = titleIn.value.trim();
+      if (!t) return toast('Give the copy a title', 'bad');
+      pkg.meta.title = t;
+      pkg.meta.id = await uniqueId(slugify(`${t} ${pkg.meta.artist}`));
+      studioState.savedId = pkg.meta.id; // save() keeps an assigned id
+      m.close();
+      if (await save()) render();
+    };
+    titleIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') void confirmSave(); });
+    const m = modal(
+      h('div', null,
+        h('h2', { class: 'display', style: { marginTop: 0 } }, 'SAVE AS'),
+        h('div', { class: 'dim', style: { marginBottom: '14px' } }, studioState.savedId ? 'Saves a copy of this song to your library under a new title and carries on editing the copy. The original is left as it is.' : 'Saves this song to your library.'),
+        field('Title', titleIn),
+        h('div', { class: 'btn-row', style: { marginTop: '16px' } }, button(studioState.savedId ? 'SAVE COPY' : 'SAVE', () => void confirmSave(), 'primary'), button('CANCEL', () => m.close(), 'ghost')),
+      ),
+    );
+    titleIn.focus();
+    titleIn.select();
+  }
+
+  async function testPlay(): Promise<void> {
+    const pkg = studioState.pkg;
+    if (!pkg) return;
+    stopPreview();
+    closeEditor();
+    await app.boot();
+    app.navigate('game', { pkg, difficulty: studioState.targetDifficulty, mode: 'practice', back: 'studio' });
+  }
+
+  // ─── layout ───
+  function renderActions(): void {
+    clear(actions);
+    const pkg = studioState.pkg;
+    if (!pkg) {
+      actions.append(button('BACK', () => app.navigate('title'), 'ghost'));
+      return;
+    }
+    actions.append(
+      h('span', { class: `pill ${studioState.dirty ? 'accent' : ''}` }, `${pkg.meta.title || 'Untitled'}${studioState.dirty ? ' *' : ''}`),
+      ...(studioState.savedId ? [] : [h('span', { class: 'pill warn' }, 'NOT SAVED YET')]),
+      button('SAVE', () => void save(), 'primary'),
+      button('SAVE AS…', saveAs),
+      button('▶ TEST PLAY', () => void testPlay(), 'ghost'),
+      button('CLOSE', close, 'ghost'),
+      button('BACK', () => app.navigate('title'), 'ghost'),
+    );
+  }
+
+  function go(tab: StudioTab): void {
+    stopPreview();
+    closeEditor();
+    studioState.tab = tab;
+    render();
+  }
+
+  function render(): void {
+    renderActions();
+    clear(body);
+    if (!studioState.pkg) {
+      body.classList.remove('full');
+      renderOpen();
+      return;
+    }
+    const tab = studioState.tab;
+    body.classList.toggle('full', tab === 'chart');
+    body.appendChild(
+      h('div', { class: 'tabs' }, ...TABS.map((t) => h('div', { class: `tab ${t.id === tab ? 'active' : ''}`, onClick: () => { if (t.id !== tab) go(t.id); } },
+        h('span', { class: 'label' }, t.label, t.id === 'record' && studioState.recorded.length ? h('span', { class: 'dot' }) : null),
+        h('span', { class: 'hint' }, t.hint)))),
+    );
+    switch (tab) {
+      case 'song': return renderSong();
+      case 'record': return renderRecord();
+      case 'chart': return renderChart();
+    }
+  }
+
+  // ─── OPEN ───
+  function renderOpen(): void {
+    const list = h('div', { class: 'song-rows' }, h('span', { class: 'mute' }, 'Loading…'));
+    app.library.listAll().then((entries) => {
+      clear(list);
+      if (!entries.length) list.appendChild(h('span', { class: 'mute' }, 'Your library is empty.'));
+      for (const e of entries) {
+        const charts = Object.keys(e.meta.charts ?? {});
+        list.appendChild(h('div', { class: 'song-row', onClick: () => void openExisting(e) },
+          h('div', { class: 'who' }, h('div', { class: 'title' }, e.meta.title), h('div', { class: 'artist' }, e.meta.artist)),
+          h('span', { class: 'pill' }, `${Math.round(e.meta.bpm)} BPM`),
+          h('span', { class: 'pill' }, charts.length ? charts.join(' · ') : 'no charts'),
+          e.source === 'bundled' ? h('span', { class: 'pill accent' }, 'BUNDLED') : null,
+          button('OPEN', () => void openExisting(e), 'small'),
+        ));
+      }
+    });
+    body.append(
+      h('div', { class: 'studio-open' },
+        h('div', { class: 'panel' },
+          h('h2', { class: 'display' }, 'NEW SONG'),
+          h('div', { class: 'dim' }, 'Start from an audio file: a full mix WITHOUT drums (mp3, wav, flac, aac, m4a, ogg). Set the tempo and offset, then record the drum part on your pads or draw it in the chart editor. The game plays your drum samples on top.'),
+          h('div', { class: 'btn-row', style: { marginTop: '16px' } }, button('CHOOSE AUDIO FILE', () => void newFromAudio(), 'primary big')),
+        ),
+        h('div', { class: 'panel' },
+          h('h2', { class: 'display' }, 'OPEN A SONG'),
+          h('div', { class: 'dim', style: { marginBottom: '12px' } }, 'Change its details, record a new take, or fix notes in the chart. Saving a bundled song keeps your edited version in the library; remove it from the song list to get the original back.'),
+          list,
+        ),
+      ),
+    );
+  }
+
+  // ─── SONG ───
+  function renderSong(): void {
     const pkg = studioState.pkg!;
     const meta = pkg.meta;
     const buf = studioState.audioBuffer!;
-    const bpmInput = h('input', { class: 'input', type: 'number', step: 0.01, min: 20, max: 300, value: meta.bpm, onChange: (e: Event) => { meta.bpm = Number((e.target as HTMLInputElement).value) || 120; picker?.setBpm(meta.bpm); } });
-    const offsetInput = h('input', { class: 'input', type: 'number', step: 0.001, value: meta.offset, onChange: (e: Event) => { meta.offset = Number((e.target as HTMLInputElement).value) || 0; picker?.setOffset(meta.offset); } });
+    const bpmInput = h('input', { class: 'input', type: 'number', step: 0.01, min: 20, max: 300, value: meta.bpm, onChange: (e: Event) => { meta.bpm = Number((e.target as HTMLInputElement).value) || 120; picker?.setBpm(meta.bpm); markDirty(); } });
+    const offsetInput = h('input', { class: 'input', type: 'number', step: 0.001, value: meta.offset, onChange: (e: Event) => { meta.offset = Number((e.target as HTMLInputElement).value) || 0; picker?.setOffset(meta.offset); markDirty(); } });
     picker?.dispose();
-    picker = offsetPicker(app, buf, meta.offset, meta.bpm, (v) => { meta.offset = v; offsetInput.value = String(v); }, (b) => { meta.bpm = b; bpmInput.value = String(b); });
+    picker = offsetPicker(app, buf, meta.offset, meta.bpm, (v) => { meta.offset = v; offsetInput.value = String(v); markDirty(); }, (b) => { meta.bpm = b; bpmInput.value = String(b); markDirty(); });
     // tap tempo
     const taps: number[] = [];
     const tapBtn = button('TAP TEMPO', () => {
@@ -150,6 +316,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         meta.bpm = Math.round((60000 / mean) * 10) / 10;
         bpmInput.value = String(meta.bpm);
         picker?.setBpm(meta.bpm);
+        markDirty();
         tapBtn.textContent = `TAP TEMPO (${meta.bpm})`;
       } else tapBtn.textContent = `TAP TEMPO (${taps.length}/4)`;
     });
@@ -183,20 +350,30 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         meta.offset = Math.round(t * 1000) / 1000;
         offsetInput.value = String(meta.offset);
         picker?.setOffset(meta.offset);
+        markDirty();
         unsub();
         stopPreview();
         toast(`Offset set to ${meta.offset.toFixed(3)}s`, 'ok');
       });
     });
+    const text = (key: 'title' | 'artist' | 'album') =>
+      h('input', { class: 'input', value: meta[key] ?? '', onInput: (e: Event) => {
+        const v = (e.target as HTMLInputElement).value;
+        if (key === 'album') meta.album = v || undefined;
+        else meta[key] = v;
+        markDirty();
+        if (key === 'title') renderActions();
+      } });
+    const chartPills = DIFFICULTIES.map((d) => h('span', { class: `pill ${meta.charts[d] ? 'ok' : ''}` }, `${d}: ${meta.charts[d] ? 'chart' : 'auto'}`));
     body.append(
       h('div', { class: 'studio' },
         h('div', { class: 'panel' },
           h('h2', { class: 'display' }, 'SONG DETAILS'),
           h('div', { class: 'grid-2' },
-            field('Title', h('input', { class: 'input', value: meta.title, onChange: (e: Event) => { meta.title = (e.target as HTMLInputElement).value; } })),
-            field('Artist', h('input', { class: 'input', value: meta.artist, onChange: (e: Event) => { meta.artist = (e.target as HTMLInputElement).value; } })),
-            field('Album', h('input', { class: 'input', value: meta.album ?? '', onChange: (e: Event) => { meta.album = (e.target as HTMLInputElement).value || undefined; } })),
-            field('Accent colour', h('input', { class: 'input', type: 'color', value: meta.accent ?? '#ff2d75', onChange: (e: Event) => { meta.accent = (e.target as HTMLInputElement).value; } })),
+            field('Title', text('title')),
+            field('Artist', text('artist')),
+            field('Album', text('album')),
+            field('Accent colour', h('input', { class: 'input', type: 'color', value: meta.accent ?? '#ff2d75', onChange: (e: Event) => { meta.accent = (e.target as HTMLInputElement).value; markDirty(); } })),
           ),
           h('h3', null, 'Tempo'),
           h('div', { class: 'row' }, h('div', { class: 'field', style: { flex: '0 0 140px', marginBottom: 0 } }, h('label', null, 'BPM'), bpmInput), tapBtn, playBtn),
@@ -205,20 +382,19 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
           h('div', { class: 'small mute', style: { marginBottom: '8px' } }, 'Chart time 0 = beat 1 of bar 1. Place the mark where that downbeat lands in the audio, then fine-tune it on the zoomed view and play around it to check.'),
           picker.el,
           h('div', { class: 'row', style: { marginTop: '10px' } }, h('div', { class: 'field', style: { flex: '0 0 140px', marginBottom: 0 } }, h('label', null, 'Seconds before beat 1'), offsetInput), tapOffset),
-          h('h3', null, 'Recording'),
-          h('div', { class: 'row' },
-            h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: studioState.metronome, onChange: (e: Event) => { studioState.metronome = (e.target as HTMLInputElement).checked; } }), 'Metronome while recording'),
-            h('div', { class: 'field', style: { marginBottom: 0 } }, h('label', null, 'Count-in bars'), select([1, 2, 4].map((n) => ({ value: String(n), label: `${n}` })), String(studioState.countInBars), (v) => { studioState.countInBars = Number(v); })),
-          ),
-          h('div', { class: 'btn-row', style: { marginTop: '24px' } }, button('NEXT: RECORD →', () => go('record'), 'primary big')),
         ),
         h('div', { class: 'panel' },
-          h('h3', { style: { marginTop: 0 } }, 'Custom drum samples'),
+          h('h3', { style: { marginTop: 0 } }, 'Charts'),
+          h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '6px' } }, ...chartPills),
+          h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart when the song is played. Record a take or edit the chart to make one real.'),
+          h('h3', null, 'Custom drum samples'),
           h('div', { class: 'small dim' }, 'Optional. Assign a sample (wav/mp3/flac/aac) per drum for this song. Missing drums use the built-in kit.'),
           samplesEditor(),
           h('h3', null, 'Audio'),
           h('div', { class: 'small mono dim' }, `${meta.audio} · ${fmtTime(buf.duration)} · ${buf.sampleRate} Hz · ${buf.numberOfChannels} ch`),
-          availableDifficulties(pkg).length ? h('div', { style: { marginTop: '10px' } }, h('span', { class: 'pill ok' }, `charts: ${availableDifficulties(pkg).join(', ')}`)) : null,
+          h('h3', null, 'Share'),
+          h('div', { class: 'small dim', style: { marginBottom: '8px' } }, 'The song folder holds song.json, the audio, one MIDI per difficulty (GM drum notes, channel 10) and any custom samples. Zip it to share it.'),
+          h('div', { class: 'btn-row' }, button('DOWNLOAD SONG ZIP', async () => { editor?.flush(); downloadBlob(await exportSongZip(pkg), `${pkg.meta.id}.zip`); })),
         ),
       ),
     );
@@ -230,14 +406,33 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     const rerender = () => {
       clear(list);
       for (const voice of DRUM_VOICES) {
-        const custom = studioState.customSamples[voice] ?? (pkg.meta.samples?.[voice] ? { fileName: pkg.meta.samples[voice]!, blob: pkg.files.get(pkg.meta.samples[voice]!)! } : undefined);
+        const path = pkg.meta.samples?.[voice];
         list.appendChild(h('div', { class: 'voice-chip', style: { '--v': VOICE_COLORS[voice] } },
           h('div', { class: 'name' }, VOICE_LABELS[voice]),
-          h('div', { class: 'pads' }, custom ? custom.fileName.split('/').pop() : 'built-in'),
+          h('div', { class: 'pads' }, path ? path.split('/').pop() : 'built-in'),
           h('div', { class: 'btn-row' },
-            button('PICK', async () => { const [f] = await pickFile('audio/*'); if (!f) return; studioState.customSamples[voice] = { blob: f, fileName: f.name }; rerender(); }, 'icon small'),
-            custom ? button('✕', () => { delete studioState.customSamples[voice]; if (pkg.meta.samples) delete pkg.meta.samples[voice]; rerender(); }, 'icon ghost small') : null,
-            button('▶', async () => { await app.boot(); if (custom) { await app.kit.loadSample(voice, await custom.blob.arrayBuffer()); app.kitCustomized = true; } app.kit.trigger(voice, 1); }, 'icon ghost small'),
+            button('PICK', async () => {
+              const [f] = await pickFile('audio/*');
+              if (!f) return;
+              const ext = fileExtension(f.name);
+              if (!(SAMPLE_EXTENSIONS as readonly string[]).includes(ext)) return toast(`Unsupported sample type .${ext} (use ${SAMPLE_EXTENSIONS.join(', ')})`, 'bad');
+              if (path) pkg.files.delete(path);
+              const p = `samples/${voice}.${ext}`;
+              pkg.files.set(p, f);
+              (pkg.meta.samples ??= {})[voice] = p;
+              markDirty();
+              rerender();
+              applySongKit(app, pkg).catch((err) => console.warn('kit load failed', err));
+            }, 'icon small'),
+            path ? button('✕', () => {
+              pkg.files.delete(path);
+              delete pkg.meta.samples![voice];
+              if (!Object.keys(pkg.meta.samples!).length) delete pkg.meta.samples;
+              markDirty();
+              rerender();
+              applySongKit(app, pkg).catch((err) => console.warn('kit load failed', err));
+            }, 'icon ghost small') : null,
+            button('▶', async () => { await app.boot(); app.kit.trigger(voice, 1); }, 'icon ghost small'),
           ),
         ));
       }
@@ -246,28 +441,37 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     return list;
   }
 
-  // ─── 3. RECORD ───
+  // ─── RECORD ───
   function renderRecord(): void {
+    if (studioState.recorded.length && !recordSetup) renderTake();
+    else renderRecordSetup();
+  }
+
+  function renderRecordSetup(): void {
     const pkg = studioState.pkg!;
+    const d = studioState.targetDifficulty;
     body.append(
       h('div', { class: 'panel', style: { maxWidth: '760px', margin: '0 auto' } },
-        h('h2', { class: 'display' }, 'RECORD'),
+        h('h2', { class: 'display' }, 'RECORD A TAKE'),
         h('div', { class: 'hint-box' }, `You'll get a ${studioState.countInBars}-bar count-in${studioState.metronome ? ' with a metronome' : ''}, then the song plays. Every pad hit is captured with its velocity. Your hits appear on the highway and recede into the distance as you carve the chart. Press ESC to abort.`),
         h('div', { style: { marginTop: '16px' } }, h('span', { class: 'pill' }, `${pkg.meta.bpm} BPM`), ' ', h('span', { class: 'pill' }, `offset ${pkg.meta.offset}s`), ' ', h('span', { class: 'pill' }, app.input.deviceConfig ? app.input.deviceConfig.deviceName : 'keyboard only')),
-        studioState.recorded.length ? h('div', { style: { marginTop: '12px' } }, h('span', { class: 'pill ok' }, `last take: ${studioState.recorded.length} hits`), ' ', button('USE LAST TAKE →', () => go('quantize'), 'small')) : null,
-        h('h3', null, 'Which difficulty is this take?'),
-        h('div', { class: 'diffs', style: { maxWidth: '520px' } }, ...DIFFICULTIES.map((d) => h('div', { class: `diff ${d === studioState.targetDifficulty ? 'selected' : ''}`, dataset: { d }, onClick: () => { studioState.targetDifficulty = d; render(); } }, d.toUpperCase(), h('span', { class: 'best' }, pkg.meta.charts?.[d] ? 'has chart · will replace' : 'new')))),
-        h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'Record the hardest part you can play and the easier difficulties can be generated from it when you save.'),
+        studioState.recorded.length ? h('div', { style: { marginTop: '12px' } }, h('span', { class: 'pill ok' }, `pending take: ${studioState.recorded.length} hits`), ' ', button('BACK TO THE TAKE →', () => { recordSetup = false; render(); }, 'small')) : null,
+        h('h3', null, 'Which difficulty is this take for?'),
+        h('div', { class: 'diffs', style: { maxWidth: '520px' } }, ...DIFFICULTIES.map((x) => h('div', { class: `diff ${x === d ? 'selected' : ''}`, dataset: { d: x }, onClick: () => { studioState.targetDifficulty = x; render(); } }, x.toUpperCase(), h('span', { class: 'best' }, pkg.meta.charts?.[x] ? 'has chart · will replace' : 'new')))),
+        h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'Record the hardest part you can play; easier difficulties can be generated from it.'),
+        h('h3', null, 'Count-in'),
+        h('div', { class: 'row' },
+          h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: studioState.metronome, onChange: (e: Event) => { studioState.metronome = (e.target as HTMLInputElement).checked; } }), 'Metronome while recording'),
+          h('div', { class: 'field', style: { marginBottom: 0 } }, h('label', null, 'Count-in bars'), select([1, 2, 4].map((n) => ({ value: String(n), label: `${n}` })), String(studioState.countInBars), (v) => { studioState.countInBars = Number(v); })),
+        ),
         h('div', { class: 'btn-row', style: { marginTop: '24px' } },
-          button(`● START RECORDING · ${studioState.targetDifficulty.toUpperCase()}`, async () => { await app.boot(); app.navigate('game', { pkg, difficulty: studioState.targetDifficulty, mode: 'record' }); }, 'primary big'),
-          button('← BACK', () => go('details'), 'ghost'),
+          button(`● START RECORDING · ${d.toUpperCase()}`, async () => { stopPreview(); await app.boot(); app.navigate('game', { pkg, difficulty: d, mode: 'record' }); }, 'primary big'),
         ),
       ),
     );
   }
 
-  // ─── 4. QUANTIZE ───
-  function renderQuantize(): void {
+  function renderTake(): void {
     const pkg = studioState.pkg!;
     const tempoMap = constantTempoMap(pkg.meta.bpm);
     const statsEl = h('div');
@@ -299,7 +503,6 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       ctx.fillRect(0, 0, w, hh);
       const dur = Math.max(1, studioState.audioBuffer!.duration);
       const lanes = DRUM_VOICES;
-      // beat grid
       const beat = 60 / pkg.meta.bpm;
       ctx.strokeStyle = 'rgba(255,255,255,0.08)';
       for (let b = 0; b * beat < dur; b++) {
@@ -310,7 +513,6 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         ctx.lineTo(x, hh);
         ctx.stroke();
       }
-      // raw (dim) vs quantized (bright)
       const draw = (notes: { time: number; voice: DrumVoice; velocity: number }[], alpha: number) => {
         for (const n of notes) {
           const x = ((n.time + pkg.meta.offset) / dur) * w;
@@ -330,16 +532,16 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       }
     };
     const gridSel = select(QUANTIZE_GRIDS.map((g) => ({ value: g.id, label: g.label })), quant.grid, (v) => { quant = { ...quant, grid: v as QuantizeOptions['grid'] }; applyQuant(); });
-    const strength = h('input', { class: 'input', type: 'range', min: 0, max: 1, step: 0.05, value: quant.strength, onInput: (e: Event) => { quant = { ...quant, strength: Number((e.target as HTMLInputElement).value) }; strengthV.textContent = `${Math.round(quant.strength * 100)}%`; applyQuant(); } });
     const strengthV = h('span', { class: 'mono small' }, `${Math.round(quant.strength * 100)}%`);
-    const swing = h('input', { class: 'input', type: 'range', min: 0, max: 1, step: 0.05, value: quant.swing, onInput: (e: Event) => { quant = { ...quant, swing: Number((e.target as HTMLInputElement).value) }; swingV.textContent = `${Math.round(quant.swing * 100)}%`; applyQuant(); } });
+    const strength = h('input', { class: 'input', type: 'range', min: 0, max: 1, step: 0.05, value: quant.strength, onInput: (e: Event) => { quant = { ...quant, strength: Number((e.target as HTMLInputElement).value) }; strengthV.textContent = `${Math.round(quant.strength * 100)}%`; applyQuant(); } });
     const swingV = h('span', { class: 'mono small' }, `${Math.round(quant.swing * 100)}%`);
+    const swing = h('input', { class: 'input', type: 'range', min: 0, max: 1, step: 0.05, value: quant.swing, onInput: (e: Event) => { quant = { ...quant, swing: Number((e.target as HTMLInputElement).value) }; swingV.textContent = `${Math.round(quant.swing * 100)}%`; applyQuant(); } });
     const dedupe = h('input', { class: 'input', type: 'number', min: 0, max: 200, step: 5, value: Math.round(quant.dedupeWindow * 1000), onChange: (e: Event) => { quant = { ...quant, dedupeWindow: Number((e.target as HTMLInputElement).value) / 1000 }; applyQuant(); } });
     let raf = 0;
     const playBtn = button('▶ PREVIEW (song + your drums)', async () => {
       if (transport) { stopPreview(); cancelAnimationFrame(raf); playBtn.textContent = '▶ PREVIEW (song + your drums)'; return; }
       await app.boot();
-      await applySongKitForStudio();
+      await applySongKit(app, pkg);
       transport = new Transport(app.engine);
       transport.load(studioState.audioBuffer!);
       player = new ChartPlayer(app.engine, app.kit, transport);
@@ -360,100 +562,97 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       transport.seek(frac * studioState.audioBuffer!.duration);
       player?.resync();
     });
+    const diffSel = select(DIFFICULTIES.map((d) => ({ value: d, label: `${d.toUpperCase()}${pkg.meta.charts?.[d] ? ' (replaces chart)' : ''}` })), studioState.targetDifficulty, (v) => { studioState.targetDifficulty = v as Difficulty; useBtn.textContent = useLabel(); });
+    const useLabel = () => `USE TAKE AS ${studioState.targetDifficulty.toUpperCase()} CHART →`;
+    const useBtn = button(useLabel(), () => {
+      const chart = quantized;
+      if (!chart) return;
+      const d = studioState.targetDifficulty;
+      stopPreview();
+      cancelAnimationFrame(raf);
+      setChart(d, chart);
+      const made: string[] = [d];
+      if (deriveEasier) {
+        for (const x of DIFFICULTIES) {
+          if (x === d || pkg.meta.charts[x] || DIFFICULTIES.indexOf(x) > DIFFICULTIES.indexOf(d)) continue;
+          setChart(x, deriveDifficulty(chart, x), true);
+          made.push(x);
+        }
+      }
+      studioState.recorded = [];
+      studioState.chart = null;
+      quantized = null;
+      toast(`Take written to the ${made.join(', ')} chart${made.length > 1 ? 's' : ''} — fine-tune it here, then SAVE`, 'ok', 4000);
+      go('chart');
+    }, 'primary big');
     body.append(
       h('div', { class: 'studio' },
         h('div', { class: 'panel' },
-          h('h2', { class: 'display' }, 'QUANTIZE'),
-          h('div', { style: { marginBottom: '8px' } }, h('span', { class: 'pill accent' }, `${studioState.targetDifficulty.toUpperCase()} TAKE`)),
-          h('div', { class: 'dim' }, `${studioState.recorded.length} raw hits captured. Snap them to the grid, preview, then save.`),
+          h('h2', { class: 'display' }, 'QUANTIZE THE TAKE'),
+          h('div', { class: 'dim' }, `${studioState.recorded.length} raw hits captured. Snap them to the grid, preview, then use the take as a chart.`),
           h('div', { style: { marginTop: '14px' } }, timeline),
           h('div', { class: 'small mute', style: { marginTop: '4px' } }, 'Dim = raw hits · bright = quantized · click to seek while previewing'),
-          h('div', { class: 'btn-row', style: { marginTop: '14px' } }, playBtn, button('RE-RECORD', () => go('record'), 'ghost')),
+          h('div', { class: 'btn-row', style: { marginTop: '14px' } }, playBtn),
           h('div', { style: { marginTop: '16px' } }, statsEl),
-          h('div', { class: 'btn-row', style: { marginTop: '24px' } }, button('NEXT: SAVE →', () => go('save'), 'primary big')),
+          h('div', { class: 'btn-row', style: { marginTop: '24px' } },
+            useBtn,
+            button('RECORD ANOTHER TAKE', () => { stopPreview(); cancelAnimationFrame(raf); recordSetup = true; render(); }, 'ghost'),
+            button('DISCARD TAKE', () => { if (!confirm('Throw away this take?')) return; stopPreview(); cancelAnimationFrame(raf); studioState.recorded = []; studioState.chart = null; quantized = null; render(); }, 'ghost'),
+          ),
         ),
         h('div', { class: 'panel' },
-          h('h3', { style: { marginTop: 0 } }, 'Quantize options'),
+          h('h3', { style: { marginTop: 0 } }, 'Quantize'),
           field('Grid', gridSel),
           field('Strength', h('div', { class: 'row' }, strength, strengthV), '100% snaps fully; lower keeps some of your feel.'),
           field('Swing', h('div', { class: 'row' }, swing, swingV), 'Delays off-beats (1/8, 1/16, 1/32 grids).'),
           field('Merge double-hits within (ms)', dedupe, 'Collapses accidental double triggers on the same drum.'),
+          h('h3', null, 'Use as'),
+          field('Difficulty', diffSel),
+          h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: deriveEasier, onChange: (e: Event) => { deriveEasier = (e.target as HTMLInputElement).checked; } }), 'Also generate the easier difficulties that have no chart yet'),
         ),
       ),
     );
     applyQuant();
   }
 
-  async function applySongKitForStudio(): Promise<void> {
+  // ─── CHART ───
+  function renderChart(): void {
     const pkg = studioState.pkg!;
-    // Merge picked custom samples into a temp package view for the kit loader.
-    const tmp: SongPackage = { ...pkg, files: new Map(pkg.files), meta: { ...pkg.meta, samples: { ...(pkg.meta.samples ?? {}) } } };
-    for (const [voice, s] of Object.entries(studioState.customSamples) as [DrumVoice, { blob: Blob; fileName: string }][]) {
-      const path = `samples/${voice}.${s.fileName.split('.').pop()}`;
-      tmp.files.set(path, s.blob);
-      tmp.meta.samples![voice] = path;
-    }
-    await applySongKit(app, tmp);
+    const token = ++editorToken;
+    const pane = h('div', { class: 'studio-pane chart' }, h('div', { class: 'dim' }, 'Loading chart…'));
+    body.appendChild(pane);
+    chartEditor(app, {
+      pkg,
+      audio: studioState.audioBuffer!,
+      difficulty: studioState.targetDifficulty,
+      onChange: markDirty,
+      onDifficulty: (d) => { studioState.targetDifficulty = d; },
+      onSave: () => void save(),
+      actions: [
+        button('EXPORT MIDI', () => { if (!editor) return; downloadBlob(midiBlob(editor.toChart(), pkg.meta.title), `${slugify(pkg.meta.title)}-${editor.difficulty}.mid`); }),
+      ],
+    }).then((ed) => {
+      if (token !== editorToken) {
+        ed.dispose();
+        return;
+      }
+      editor = ed;
+      clear(pane);
+      pane.appendChild(ed.el);
+    }).catch((err) => {
+      clear(pane);
+      pane.appendChild(h('div', { class: 'hint-box' }, `Could not open the chart: ${(err as Error).message}`));
+    });
   }
 
-  // ─── 5. SAVE ───
-  function renderSave(): void {
-    const pkg = studioState.pkg!;
-    const chart = studioState.chart ?? quantized;
-    if (!chart) { go('quantize'); return; }
-    let diff: Difficulty = studioState.targetDifficulty;
-    let deriveOthers = true;
-    const diffSel = select(DIFFICULTIES.map((d) => ({ value: d, label: d.toUpperCase() })), diff, (v) => { diff = v as Difficulty; studioState.targetDifficulty = diff; });
-    const finalize = (): SongPackage => {
-      const out: SongPackage = { ...pkg, files: new Map(pkg.files), meta: { ...pkg.meta, charts: { ...pkg.meta.charts }, samples: { ...(pkg.meta.samples ?? {}) } } };
-      out.meta.id = out.meta.id || slugify(`${out.meta.title}-${out.meta.artist}`);
-      out.meta.length = studioState.audioBuffer!.duration;
-      const midi = writeMidi(chartToMidi(chart, { trackName: `${out.meta.title} — ${diff}` }));
-      out.files.set(`${diff}.mid`, new Blob([midiBytes(midi)], { type: 'audio/midi' }));
-      out.meta.charts[diff] = `${diff}.mid`;
-      if (deriveOthers) {
-        for (const d of DIFFICULTIES) {
-          if (d === diff || out.meta.charts[d]) continue;
-          if (DIFFICULTIES.indexOf(d) < DIFFICULTIES.indexOf(diff)) {
-            const derived = deriveDifficulty(chart, d);
-            out.files.set(`${d}.mid`, new Blob([midiBytes(writeMidi(chartToMidi(derived, { trackName: `${out.meta.title} — ${d} (auto)` })))], { type: 'audio/midi' }));
-            out.meta.charts[d] = `${d}.mid`;
-          }
-        }
-      }
-      for (const [voice, s] of Object.entries(studioState.customSamples) as [DrumVoice, { blob: Blob; fileName: string }][]) {
-        const path = `samples/${voice}.${(s.fileName.split('.').pop() ?? 'wav').toLowerCase()}`;
-        out.files.set(path, s.blob);
-        out.meta.samples![voice] = path;
-      }
-      if (!Object.keys(out.meta.samples!).length) delete out.meta.samples;
-      return out;
-    };
-    body.append(
-      h('div', { class: 'panel', style: { maxWidth: '760px', margin: '0 auto' } },
-        h('h2', { class: 'display' }, 'SAVE & SHARE'),
-        h('div', { class: 'dim' }, `${chart.notes.length} notes · ${pkg.meta.title} — ${pkg.meta.artist}`),
-        h('div', { class: 'grid-2', style: { marginTop: '16px' } },
-          field('Save this take as difficulty', diffSel),
-          h('label', { class: 'toggle', style: { alignSelf: 'end', marginBottom: '14px' } }, h('input', { type: 'checkbox', checked: deriveOthers, onChange: (e: Event) => { deriveOthers = (e.target as HTMLInputElement).checked; } }), 'Auto-generate easier difficulties (as files)'),
-        ),
-        h('div', { class: 'hint-box' }, 'The song folder contains song.json, the audio, one MIDI per difficulty (GM drum notes, channel 10), and any custom samples. Open the MIDI in any DAW to fine-tune, then drop it back in the folder.'),
-        h('div', { class: 'btn-row', style: { marginTop: '24px' } },
-          button('ADD TO LIBRARY', async () => { const out = finalize(); await app.library.import(out); studioState.pkg = out; toast(`"${out.meta.title}" added to your library`, 'ok'); }, 'primary big'),
-          button('DOWNLOAD SONG ZIP', async () => { const out = finalize(); downloadBlob(await exportSongZip(out), `${out.meta.id}.zip`); }, 'big'),
-          button('DOWNLOAD MIDI ONLY', () => { const midi = writeMidi(chartToMidi(chart, { trackName: pkg.meta.title })); downloadBlob(new Blob([midiBytes(midi)], { type: 'audio/midi' }), `${slugify(pkg.meta.title)}-${diff}.mid`); }),
-        ),
-        h('div', { class: 'btn-row', style: { marginTop: '24px' } },
-          button('PLAY IT NOW', async () => { const out = finalize(); await app.library.import(out); app.navigate('game', { pkg: out, difficulty: diff, mode: 'play' }); }),
-          button('OPEN IN EDITOR', async () => { const out = finalize(); await app.library.import(out); studioState.pkg = out; app.navigate('editor', { pkg: out, difficulty: diff, back: 'studio' }); }),
-          button('← QUANTIZE', () => go('quantize'), 'ghost'),
-          button('DONE', () => app.navigate('title'), 'ghost'),
-        ),
-      ),
-    );
-  }
-
-  const el = h('div', { class: 'screen' }, topbar(app, 'STUDIO', button('BACK', () => app.navigate('title'), 'ghost')), h('div', { class: 'screen-body' }, h('div', { style: { maxWidth: '1200px', margin: '0 auto' } }, stepsEl, body)));
+  const el = h('div', { class: 'screen' }, topbar(app, 'STUDIO', actions), h('div', { class: 'screen-body studio-body' }, body));
   render();
-  return { el, dispose: () => { stopPreview(); picker?.dispose(); } };
+  return {
+    el,
+    dispose: () => {
+      stopPreview();
+      closeEditor();
+      picker?.dispose();
+    },
+  };
 }

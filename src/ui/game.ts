@@ -395,7 +395,8 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     session?.stop();
     recorder?.discard();
     recorder = null;
-    if (mode === 'record') app.navigate('studio');
+    if (mode === 'record') app.navigate('studio', { tab: 'record' });
+    else if (params?.back === 'studio') app.navigate('studio');
     else app.navigate(mode === 'practice' ? 'songs-practice' : 'songs');
   }
 
@@ -403,7 +404,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     if (mode === 'record') {
       studioState.recorded = recorded;
       toast(`Captured ${recorded.length} hits`, 'ok');
-      app.navigate('studio', { step: 'quantize' });
+      app.navigate('studio', { tab: 'record' });
       return;
     }
     let video: unknown = undefined;
@@ -417,7 +418,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         toast('Video recording failed', 'bad');
       }
     }
-    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), video });
+    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), video, back: params?.back });
   }
 
   const onKey = (e: KeyboardEvent) => {
