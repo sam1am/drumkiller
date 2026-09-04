@@ -57,6 +57,7 @@ export function mergeSettings(raw: unknown): Settings {
     laneOrder: mergeLaneOrder(r.laneOrder),
     recordVideo: typeof r.recordVideo === 'boolean' ? r.recordVideo : d.recordVideo,
     recordMic: typeof r.recordMic === 'boolean' ? r.recordMic : d.recordMic,
+    recordRotate: typeof r.recordRotate === 'boolean' ? r.recordRotate : d.recordRotate,
     recordResolution: RECORD_RESOLUTIONS.includes(r.recordResolution as RecordResolution) ? (r.recordResolution as RecordResolution) : d.recordResolution,
   };
   if (typeof r.lastDeviceKey === 'string' && r.lastDeviceKey) settings.lastDeviceKey = r.lastDeviceKey;

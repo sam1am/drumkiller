@@ -24,13 +24,14 @@ describe('SettingsStore', () => {
   });
 
   it('validates video recording settings', () => {
-    const s = new SettingsStore(memoryKV({ [SETTINGS_KEY]: JSON.stringify({ recordVideo: true, recordResolution: 480, recordCameraId: 'cam-1' }) })).get();
+    const s = new SettingsStore(memoryKV({ [SETTINGS_KEY]: JSON.stringify({ recordVideo: true, recordResolution: 480, recordCameraId: 'cam-1', recordRotate: 'yes' }) })).get();
     expect(s.recordVideo).toBe(true);
+    expect(s.recordRotate).toBe(false);
     expect(s.recordResolution).toBe(DEFAULT_SETTINGS.recordResolution);
     expect(s.recordCameraId).toBe('cam-1');
     const store = new SettingsStore(memoryKV());
-    store.update({ recordCameraId: 'cam-2', recordResolution: 1080 });
-    expect(store.get()).toMatchObject({ recordCameraId: 'cam-2', recordResolution: 1080 });
+    store.update({ recordCameraId: 'cam-2', recordResolution: 1080, recordRotate: true });
+    expect(store.get()).toMatchObject({ recordCameraId: 'cam-2', recordResolution: 1080, recordRotate: true });
     store.update({ recordCameraId: undefined });
     expect('recordCameraId' in store.get()).toBe(false);
   });

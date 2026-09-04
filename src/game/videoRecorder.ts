@@ -45,6 +45,8 @@ export interface VideoRecorderOptions {
   gameAudio: MediaStream;
   /** Mix the camera's audio track into the recording. */
   mic: boolean;
+  /** Rotate the camera picture 180° (upside-down webcam). */
+  rotateCamera?: boolean;
   audioContext: AudioContext;
   captureNode: MediaStreamAudioDestinationNode;
   /** Output height (16:9). */
@@ -226,6 +228,12 @@ export class VideoRecorder {
     const scale = Math.max(r.w / v.videoWidth, r.h / v.videoHeight);
     const w = v.videoWidth * scale;
     const h = v.videoHeight * scale;
+    if (this.opts.rotateCamera) {
+      // 180° about the column's centre: draw the same cover-crop, upside down.
+      ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+      ctx.rotate(Math.PI);
+      ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
+    }
     ctx.drawImage(v, r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h);
     ctx.restore();
     // Divider between the camera column and the game.

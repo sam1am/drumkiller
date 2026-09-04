@@ -277,6 +277,8 @@ export interface Settings {
   recordCameraId?: string;
   /** Mix the webcam's microphone into the recording (raw, no voice processing). */
   recordMic: boolean;
+  /** Rotate the camera picture 180° (for a webcam mounted upside down over the pads). */
+  recordRotate: boolean;
   /** Output height in pixels (16:9). */
   recordResolution: RecordResolution;
 }
@@ -311,5 +313,6 @@ export const DEFAULT_SETTINGS: Settings = {
   strictVoices: true,
   recordVideo: false,
   recordMic: false,
+  recordRotate: false,
   recordResolution: 720,
 };

@@ -150,6 +150,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         camera,
         gameAudio: app.engine.captureNode.stream,
         mic: settings.recordMic,
+        rotateCamera: settings.recordRotate,
         audioContext: app.engine.ctx,
         captureNode: app.engine.captureNode,
         height: settings.recordResolution,
@@ -158,7 +159,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
       });
       const cam = recorder.cameraElement;
       if (cam) {
-        cam.className = 'cam-preview';
+        cam.className = `cam-preview${settings.recordRotate ? ' rotated' : ''}`;
         cam.style.setProperty('--cam-aspect', String(CAM_ASPECT));
         hud.appendChild(cam);
       }

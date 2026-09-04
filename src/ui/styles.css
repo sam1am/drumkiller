@@ -264,6 +264,8 @@ body.dragover::after { content: 'DROP SONG ZIP TO IMPORT'; position: fixed; inse
 .video-box video { width: 100%; border-radius: 10px; background: #000; border: 1px solid var(--line); display: block; }
 .cam-test { margin-top: 10px; }
 .cam-test video { width: 100%; max-width: 360px; border-radius: 10px; background: #000; border: 1px solid var(--line); display: block; }
+/* upside-down webcam: the recorder rotates the camera column the same way */
+.hud .cam-preview.rotated, .cam-test video.rotated { transform: rotate(180deg); }
 .judge-bars .jb { display: grid; grid-template-columns: 90px 1fr 60px; gap: 10px; align-items: center; font-family: var(--font-mono); font-size: 13px; }
 .judge-bars .bar { height: 10px; border-radius: 5px; background: var(--bg-3); overflow: hidden; }
 .judge-bars .bar > div { height: 100%; border-radius: 5px; }

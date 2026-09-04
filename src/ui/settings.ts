@@ -184,7 +184,7 @@ export function settingsScreen(app: App): Screen {
     if (testStream) return stopCamTest();
     try {
       testStream = await openCamera(app.settings.recordCameraId, false);
-      const v = h('video', { autoplay: true, muted: true, playsInline: true });
+      const v = h('video', { autoplay: true, muted: true, playsInline: true, class: app.settings.recordRotate ? 'rotated' : '' });
       v.srcObject = testStream;
       camTest.appendChild(v);
       testBtn.textContent = 'STOP TEST';
@@ -201,6 +201,11 @@ export function settingsScreen(app: App): Screen {
         camTest,
         field('Video size', select([{ value: '720', label: '1280 × 720 (recommended)' }, { value: '1080', label: '1920 × 1080' }], String(s.recordResolution), (v) => app.settingsStore.update({ recordResolution: Number(v) as 720 | 1080 }))),
         h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordMic, onChange: (e: Event) => app.settingsStore.update({ recordMic: (e.target as HTMLInputElement).checked }) }), 'Also record the microphone (raw — picks up your pads, and whatever your speakers play)'),
+        h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: s.recordRotate, onChange: (e: Event) => {
+          const rotate = (e.target as HTMLInputElement).checked;
+          app.settingsStore.update({ recordRotate: rotate });
+          camTest.querySelector('video')?.classList.toggle('rotated', rotate);
+        } }), 'Rotate the camera 180° (for a webcam mounted upside down over the pads)'),
       ]
     : [h('div', { class: 'small dim' }, 'This browser cannot record video (needs MediaRecorder, canvas capture and camera access). Try Chrome, Edge or Firefox.')];
 
