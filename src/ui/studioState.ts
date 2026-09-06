@@ -1,32 +1,29 @@
-import type { Chart, PerformanceNote, SongPackage, Difficulty } from '@/types';
+import type { SongPackage, Difficulty } from '@/types';
 
-export type StudioTab = 'song' | 'record' | 'chart';
+export type StudioTab = 'song' | 'chart';
 
 /**
- * Studio state — the song being edited (a working copy of a package) plus the last recorded take.
- * Survives navigation studio → game(record / test play) → studio.
+ * Studio state — the song being edited (a working copy of a package) plus editor preferences.
+ * Survives navigation studio → game (test play) → studio.
  */
 class StudioState {
   /** Working copy of the song being edited. Every tab mutates this; SAVE writes it to the library. */
   pkg: SongPackage | null = null;
+  /** Decoded drum-less mix (`meta.audio`). */
   audioBuffer: AudioBuffer | null = null;
+  /** Decoded mix with drums (`meta.audioWithDrums`), when the song has one. */
+  drumsBuffer: AudioBuffer | null = null;
   /** Library id the working copy was last saved under; null for a song that has never been saved. */
   savedId: string | null = null;
   /** True when the working copy differs from what is in the library. */
   dirty = false;
   tab: StudioTab = 'song';
-  /** Notes captured in the last recording pass (not yet applied to a chart). */
-  recorded: PerformanceNote[] = [];
-  /** Quantized take awaiting "use take". */
-  chart: Chart | null = null;
+  /** Chart editor recording: click while recording. */
   metronome = true;
+  /** Chart editor recording: bars of count-in before the take starts. */
   countInBars = 1;
-  /** The difficulty being recorded / edited. */
+  /** The difficulty being edited. */
   targetDifficulty: Difficulty = 'expert';
-  /** Provided by the studio screen: builds the (empty-notes) chart used for beats/metronome during recording. */
-  chartForRecording: (pkg: SongPackage, _?: unknown) => Chart = () => {
-    throw new Error('Studio not initialised');
-  };
 
   get open(): boolean {
     return this.pkg !== null;
@@ -35,11 +32,10 @@ class StudioState {
   reset(): void {
     this.pkg = null;
     this.audioBuffer = null;
+    this.drumsBuffer = null;
     this.savedId = null;
     this.dirty = false;
     this.tab = 'song';
-    this.recorded = [];
-    this.chart = null;
   }
 }
 

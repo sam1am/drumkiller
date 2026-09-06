@@ -1,15 +1,13 @@
 import type { App, Screen } from '@/app';
-import type { Chart, Difficulty, PerformanceNote, ScoreSummary, SongPackage } from '@/types';
-import { DIFFICULTIES, DRUM_VOICES, LANE_FOR_VOICE } from '@/types';
-import { WaveformStrip } from '@/game/waveform';
-import { VOICE_COLORS } from '@/game/renderer';
+import type { Chart, Difficulty, ScoreSummary, SongPackage } from '@/types';
+import { DIFFICULTIES, DRUM_VOICES } from '@/types';
 import { chartFromMidi, deriveDifficulty, parseMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
 import { getChartBlob } from '@/song';
 import { GameSession, type GameMode } from '@/game/session';
 import { CAM_ASPECT, VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot } from '@/game/videoRecorder';
 import { starString } from '@/game/scoring';
 import { h, button, toast, fmtScore, clear } from './dom';
-import { studioState } from './studioState';
+import type { TimingHit } from '@/game/timingHeatmap';
 
 /** Parse the chart file listed for `difficulty`, or null when the package has none. */
 export async function readChart(pkg: SongPackage, difficulty: Difficulty): Promise<Chart | null> {
@@ -83,8 +81,6 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
   const countdownEl = h('div', { class: 'countdown' });
   const modeTag = h('div', { class: 'mode-tag' });
   const timingEl = h('div', { class: 'timing' }, '');
-  const waveCanvas = h('canvas', { class: 'wave-strip' });
-  let wave: WaveformStrip | null = null;
   const practiceBar = h('div', { class: 'practice-bar' });
   const loading = h('div', { class: 'pause-overlay' }, h('div', { class: 'display', style: { fontFamily: 'var(--font-display)', fontSize: '28px' } }, 'LOADING…'));
 
@@ -101,10 +97,9 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     h('div', { class: 'acc-box' }, accEl, starsEl),
     practiceBar,
     timingEl,
-    mode === 'record' ? waveCanvas : null,
     countdownEl,
   );
-  const el = h('div', { class: `screen game ${mode === 'record' ? 'record' : ''}` }, canvas, hud, loading);
+  const el = h('div', { class: 'screen game' }, canvas, hud, loading);
 
   let session: GameSession | null = null;
   let recorder: VideoRecorder | null = null;
@@ -146,7 +141,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
 
   /** Open the webcam and prepare the recorder (never fatal: the game still runs without it). */
   async function setupRecorder(): Promise<void> {
-    if (!settings.recordVideo || mode === 'record') return;
+    if (!settings.recordVideo) return;
     if (!videoRecordingSupported()) {
       toast('Video recording is not supported in this browser', 'bad', 4000);
       return;
@@ -189,22 +184,11 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
   async function build(): Promise<void> {
     const audioBlob = pkg.files.get(pkg.meta.audio);
     if (!audioBlob) throw new Error(`Audio file "${pkg.meta.audio}" missing from song folder`);
-    const [audio, { chart, derived }] = await Promise.all([
-      app.engine.decode(await audioBlob.arrayBuffer()),
-      mode === 'record' ? Promise.resolve({ chart: studioState.chartForRecording(pkg), derived: false }) : loadChart(pkg, difficulty),
-    ]);
+    const [audio, { chart, derived }] = await Promise.all([app.engine.decode(await audioBlob.arrayBuffer()), loadChart(pkg, difficulty)]);
     await applySongKit(app, pkg);
-    if (mode !== 'record' && !chart.notes.length) toast('This chart has no notes.', 'bad');
+    if (!chart.notes.length) toast('This chart has no notes.', 'bad');
     if (derived && mode === 'play') modeTag.appendChild(h('span', { class: 'pill' }, 'AUTO CHART'));
     if (mode === 'practice') modeTag.appendChild(h('span', { class: 'pill warn' }, 'PRACTICE · NO SCORE'));
-    if (mode === 'record') {
-      modeTag.appendChild(h('span', { class: 'pill bad' }, h('span', { class: 'rec-dot' }), 'RECORDING'));
-      modeTag.appendChild(h('div', { class: 'small dim', style: { marginTop: '6px' } }, 'ESC → Finish take / Quit'));
-      comboEl.parentElement?.remove();
-      accEl.parentElement?.remove();
-      multEl.textContent = 'HITS';
-      multEl.classList.remove('max');
-    }
 
     session = new GameSession(
       app.engine,
@@ -218,7 +202,6 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         audio,
         rate,
         guideDrums,
-        metronome: mode === 'record' ? studioState.metronome : false,
         inputOffset: settings.inputOffset,
         hitWindowScale: settings.hitWindowScale,
         strictVoices: settings.strictVoices,
@@ -256,30 +239,22 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         },
         onTick: (pos, dur) => {
           progressEl.style.width = `${Math.max(0, Math.min(100, (pos / dur) * 100))}%`;
-          if (mode === 'record' && session) {
-            scoreEl.textContent = String(session.recorded.length);
-            wave?.draw(pos, session.beats, pkg.meta.offset, session.recorded.slice(-64).map((r) => ({ time: r.time, lane: LANE_FOR_VOICE[r.voice], color: VOICE_COLORS[r.voice] })));
-          }
         },
         onCountdown: (n) => {
           countdown = n;
           countdownEl.textContent = n === null ? '' : String(n);
         },
         onFrame: () => recorder?.frame(),
-        onFinish: (summary, recorded) => finish(summary, recorded),
+        onFinish: (summary) => finish(summary),
       },
       app.input,
     );
     (window as unknown as { dkSession: GameSession | null }).dkSession = session;
-    if (mode === 'record') {
-      wave = new WaveformStrip(waveCanvas, audio, { halfWindow: 5, accent: pkg.meta.accent ?? '#ff2d75' });
-      window.addEventListener('resize', onResizeWave);
-    }
     updateTiming();
     await setupRecorder();
     loading.remove();
     if (mode === 'practice') buildPracticeBar();
-    const countIn = mode === 'record' ? studioState.countInBars * (60 / pkg.meta.bpm) * 4 : 3;
+    const countIn = 3;
     if (recorder) {
       // Prime the highway so the recording's first frame (the preview's poster) shows the road.
       session.drawFrame(countIn);
@@ -288,10 +263,9 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     await session.start(countIn);
   }
 
-  const onResizeWave = () => wave?.resize();
   let inputOffset = settings.inputOffset;
   function updateTiming(): void {
-    if (!session || mode === 'record') return;
+    if (!session) return;
     const st = session.judge.timingStats();
     const avg = st.count ? `${st.mean > 0 ? '+' : ''}${Math.round(st.mean * 1000)}ms ${st.mean > 0.015 ? 'LATE' : st.mean < -0.015 ? 'EARLY' : 'ON TIME'}` : '—';
     timingEl.textContent = `timing avg ${avg} (${st.count}) · offset ${Math.round(inputOffset * 1000)}ms · [ ] adjust`;
@@ -369,7 +343,7 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     }
     session.pause();
     const st = session.judge.timingStats();
-    const timingPanel = mode === 'record' ? null : h(
+    const timingPanel = h(
       'div',
       { class: 'panel tight', style: { textAlign: 'center' } },
       h('div', { class: 'small dim' }, 'TIMING'),
@@ -390,7 +364,6 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         h('h2', { class: 'display' }, 'PAUSED'),
         timingPanel,
         button('RESUME', togglePause, 'primary'),
-        mode === 'record' ? button('FINISH TAKE', () => { pauseOverlay?.remove(); pauseOverlay = null; session?.finishNow(); }) : null,
         button('RESTART', () => restart()),
         button('QUIT', () => quit()),
       ),
@@ -409,18 +382,11 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     session?.stop();
     recorder?.discard();
     recorder = null;
-    if (mode === 'record') app.navigate('studio', { tab: 'record' });
-    else if (params?.back === 'studio') app.navigate('studio');
+    if (params?.back === 'studio') app.navigate('studio');
     else app.navigate(mode === 'practice' ? 'songs-practice' : 'songs');
   }
 
-  async function finish(summary: ScoreSummary, recorded: PerformanceNote[]): Promise<void> {
-    if (mode === 'record') {
-      studioState.recorded = recorded;
-      toast(`Captured ${recorded.length} hits`, 'ok');
-      app.navigate('studio', { tab: 'record' });
-      return;
-    }
+  async function finish(summary: ScoreSummary): Promise<void> {
     let video: unknown = undefined;
     if (recorder) {
       const rec = recorder;
@@ -432,25 +398,28 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
         toast('Video recording failed', 'bad');
       }
     }
-    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), video, back: params?.back });
+    // Every judged hit with its signed timing error, for the results screen's heatmap.
+    const hits: TimingHit[] = [];
+    for (const n of session?.judge.notes ?? []) if (n.state === 'hit' && n.delta !== undefined && n.judgement) hits.push({ voice: n.voice, delta: n.delta, judgement: n.judgement });
+    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), hits, windows: session?.judge.windows, video, back: params?.back });
   }
 
   const onKey = (e: KeyboardEvent) => {
     if (e.code === 'Escape') {
       e.preventDefault();
       togglePause();
-    } else if (e.code === 'BracketLeft' && mode !== 'record') {
+    } else if (e.code === 'BracketLeft') {
       e.preventDefault();
       nudgeOffset(-10);
-    } else if (e.code === 'BracketRight' && mode !== 'record') {
+    } else if (e.code === 'BracketRight') {
       e.preventDefault();
       nudgeOffset(10);
     }
   };
   window.addEventListener('keydown', onKey);
-  // Pause when the tab loses focus in play mode (fairness) — never in record mode.
+  // Pause when the tab loses focus (fairness).
   const onVis = () => {
-    if (document.hidden && session && !session.isPaused && mode !== 'record' && !pauseOverlay) togglePause();
+    if (document.hidden && session && !session.isPaused && !pauseOverlay) togglePause();
   };
   document.addEventListener('visibilitychange', onVis);
 
@@ -464,7 +433,6 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     el,
     dispose: () => {
       window.removeEventListener('keydown', onKey);
-      window.removeEventListener('resize', onResizeWave);
       document.removeEventListener('visibilitychange', onVis);
       session?.stop();
       recorder?.discard();

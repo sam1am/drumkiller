@@ -6,6 +6,7 @@ A DRUMKILLER song is just a **folder**. Drop a `song.json`, an audio file and a 
 thunder-road/
 ├── song.json          ← metadata (required)
 ├── audio.mp3          ← the drum-less mix (required)
+├── audio-drums.mp3    ← optional: the same mix WITH drums (studio reference)
 ├── expert.mid         ← chart(s): one MIDI file per difficulty (at least one)
 ├── hard.mid
 ├── artwork.png        ← optional cover art
@@ -33,7 +34,8 @@ Every field, what it means, and its default when omitted:
 | `bpm` | number > 0 | **yes** | — | Nominal tempo. Used as the fallback tempo when the chart has no tempo map, as the recorder grid, and for display. |
 | `offset` | number | no | `0` | Seconds of audio before chart tick 0. See [Offset](#offset). May be negative. |
 | `length` | number > 0 | no | — | Song length in seconds, for display before the audio is decoded. |
-| `audio` | path | **yes** | — | The drum-less mix. `mp3`, `wav`, `flac`, `aac`, `m4a` or `ogg` (whatever the browser can decode). |
+| `audio` | path | **yes** | — | The drum-less mix — what the game plays. `mp3`, `wav`, `flac`, `aac`, `m4a` or `ogg` (whatever the browser can decode). |
+| `audioWithDrums` | path | no | — | The same mix **with** the drums in it. Never played in the game; the studio's chart editor can switch to it while you program or record, so you can hear the part you are charting. Must start at the same instant as `audio` (same `offset`). |
 | `charts` | object | no | `{}` | Map of difficulty → MIDI path. Keys: `easy`, `medium`, `hard`, `expert`. |
 | `samples` | object | no | — | Map of drum voice → audio path for custom drum sounds. See [Custom samples](#custom-samples). |
 | `sampleGain` | number ≥ 0 | no | `1` | Linear gain applied to this song's drum samples. |
@@ -59,6 +61,7 @@ Paths are relative to the folder root, use forward slashes, and may not contain 
   "offset": 0.25,
   "length": 214,
   "audio": "audio.mp3",
+  "audioWithDrums": "audio-drums.mp3",
   "charts": {
     "hard": "hard.mid",
     "expert": "expert.mid"
@@ -156,7 +159,7 @@ To play a shared song, **drag the zip onto the game** or use **Import** on the s
 
 - [ ] `song.json` has `title`, `bpm` and `audio`
 - [ ] every path in `song.json` exists in the folder
-- [ ] the audio is a drum-less mix (or as close as you can get)
+- [ ] the audio is a drum-less mix (or as close as you can get); a second mix with drums is optional (`audioWithDrums`)
 - [ ] at least one chart, ideally `expert`
 - [ ] `offset` checked by playing the song once
 - [ ] `id` is set and you won't change it later

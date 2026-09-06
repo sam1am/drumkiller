@@ -1,4 +1,4 @@
-import { LANE_FOR_VOICE, LANE_LABELS, LANE_ORDER, type DrumVoice, type Judgement, type Lane, type PerformanceNote } from '@/types';
+import { LANE_FOR_VOICE, LANE_LABELS, LANE_ORDER, type DrumVoice, type Judgement, type Lane } from '@/types';
 import type { TrackedNote } from './scoring';
 
 export const LANE_COLORS: Record<Lane, string> = {
@@ -22,7 +22,7 @@ export const VOICE_COLORS: Record<DrumVoice, string> = {
   crash: '#2b8cff',
 };
 
-const JUDGE_COLORS: Record<Judgement, string> = { perfect: '#ffe600', great: '#8dff5a', good: '#3ef2ff', miss: '#ff3b3b' };
+export const JUDGE_COLORS: Record<Judgement, string> = { perfect: '#ffe600', great: '#8dff5a', good: '#3ef2ff', miss: '#ff3b3b' };
 
 export interface BeatMark {
   time: number;
@@ -38,10 +38,7 @@ export interface RenderState {
   beats: BeatMark[];
   combo: number;
   multiplier: number;
-  mode: 'play' | 'practice' | 'record';
-  /** Recorded hits (record mode) — drawn receding away from the strike line. */
-  recorded?: PerformanceNote[];
-  /** Notes hit by the user that the chart didn't ask for (drawn as ghost flashes). */
+  mode: 'play' | 'practice';
   paused?: boolean;
   /** Song accent color for the road glow. */
   accent?: string;
@@ -279,7 +276,6 @@ export class HighwayRenderer {
     this.drawReceptors(state, now);
     this.drawGhosts(state, now);
     this.drawNotes(state);
-    if (state.mode === 'record' && state.recorded) this.drawRecorded(state);
     this.drawParticles(dt);
     this.drawLaneLabels();
     ctx.restore();
@@ -456,19 +452,6 @@ export class HighwayRenderer {
       const z = (n.time - state.time) / state.window;
       const missed = n.state === 'missed';
       this.drawNote(n.voice, z, n.velocity, missed ? 0.35 : 1, missed);
-    }
-  }
-
-  private drawRecorded(state: RenderState): void {
-    const rec = state.recorded ?? [];
-    // Recorded hits recede into the distance: z = (time - noteTime)/window, drawn newest (near) last.
-    const t0 = state.time - state.window;
-    for (let i = rec.length - 1; i >= 0; i--) {
-      const n = rec[i];
-      if (n.time < t0) break;
-      const z = (state.time - n.time) / state.window;
-      if (z < 0) continue;
-      this.drawNote(n.voice, z, n.velocity, 0.75 - z * 0.6, false, true);
     }
   }
 

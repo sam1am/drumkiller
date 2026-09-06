@@ -1,8 +1,9 @@
 import type { App } from '@/app';
 import { DIFFICULTIES, VOICE_LABELS, type Chart, type Difficulty, type DrumVoice, type QuantizeGrid, type SongPackage } from '@/types';
 import { chartToMidi, writeMidi, performanceToChart, gridStepTicks, secondsToTicks, ticksToSeconds, QUANTIZE_GRIDS, chartStats, difficultyRating } from '@/midi';
-import { Transport, ChartPlayer } from '@/audio';
+import { Transport, ChartPlayer, Metronome } from '@/audio';
 import { h, button, toast, select, fmtTime } from './dom';
+import { studioState } from './studioState';
 import { VOICE_COLORS, type BeatMark } from '@/game/renderer';
 import { VOICE_ORDER_FOR_UI, computeBeats } from '@/game/session';
 import { computeEnvelope } from '@/game/waveform';
@@ -47,6 +48,8 @@ export interface ChartEditorOptions {
   pkg: SongPackage;
   /** Decoded song audio (the studio already has it). */
   audio: AudioBuffer;
+  /** Decoded mix WITH drums, when the song has one — the editor can switch to it. */
+  drumsAudio?: AudioBuffer;
   difficulty: Difficulty;
   /** Called on every edit so the owner can mark the song as having unsaved changes. */
   onChange: () => void;
@@ -70,11 +73,29 @@ export interface ChartEditor {
   dispose(): void;
 }
 
+/** Chart notes this far ahead of the playhead are cleared while recording in REPLACE mode (the drum player looks ahead too). */
+const REPLACE_LOOKAHEAD = 0.15;
+
+/** A recording in progress: hits land on the chart from `startT` on. */
+interface Recording {
+  /** Chart time the take starts (the count-in runs up to it). */
+  startT: number;
+  /** Seconds of one beat at the take's tempo (for the count-in readout). */
+  beatSec: number;
+  /** REPLACE mode wipes existing notes as the playhead passes over them; OVERDUB keeps them. */
+  replace: boolean;
+  /** Notes added by this take (never wiped by REPLACE). */
+  takeIds: Set<number>;
+  /** Whether the take has changed the chart yet (undo is pushed on the first change). */
+  changed: boolean;
+}
+
 /**
  * CHART EDITOR — piano-roll for drum charts, mounted inside the studio. One row per drum voice, time
  * left→right over the song waveform and beat grid. Click to add, drag to move, marquee to select,
  * Delete to remove, undo/redo, snap grid, velocity, transport playback with the drum kit, pad input
- * while playing. Edits are written into the studio's working copy via `flush()`; the studio saves.
+ * while playing, and RECORD: a count-in, then every pad hit is written onto the chart in real time.
+ * Edits are written into the studio's working copy via `flush()`; the studio saves.
  */
 export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<ChartEditor> {
   const { pkg, audio } = opts;
@@ -126,10 +147,33 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     soloed.clear();
     applyMix();
   };
-  const envChannels: Float32Array[] = [];
-  for (let c = 0; c < audio.numberOfChannels; c++) envChannels.push(audio.getChannelData(c));
-  const env = computeEnvelope(envChannels, audio.sampleRate, 200);
+  const envCache = new Map<AudioBuffer, ReturnType<typeof computeEnvelope>>();
+  const envFor = (buf: AudioBuffer) => {
+    let e = envCache.get(buf);
+    if (!e) {
+      const channels: Float32Array[] = [];
+      for (let c = 0; c < buf.numberOfChannels; c++) channels.push(buf.getChannelData(c));
+      e = computeEnvelope(channels, buf.sampleRate, 200);
+      envCache.set(buf, e);
+    }
+    return e;
+  };
+  /** Which mix is loaded in the transport: the drum-less one the game plays, or the reference WITH drums. */
+  let mix: 'audio' | 'drums' = 'audio';
+  let env = envFor(audio);
   const chartDuration = audio.duration - pkg.meta.offset;
+  const setMix = (m: 'audio' | 'drums'): void => {
+    const buf = m === 'drums' ? opts.drumsAudio : audio;
+    if (!buf || m === mix) return;
+    mix = m;
+    transport.swapBuffer(buf);
+    player.resync();
+    metro.resync();
+    env = envFor(buf);
+    drumsBtn.textContent = `MIX: ${mix === 'drums' ? 'WITH DRUMS' : 'NO DRUMS'}`;
+    drumsBtn.classList.toggle('active', mix === 'drums');
+    draw();
+  };
 
   /** Bumped on every load so a slower, older load can't overwrite a newer one. */
   let loadToken = 0;
@@ -147,6 +191,7 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     beats = computeBeats(base, chartDuration);
     difficulty = d;
     player?.setNotes(notes);
+    metro?.setTempoMap(base.tempoMap, base.ppq, base.timeSignatures);
     updateStatus();
   }
 
@@ -155,13 +200,21 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   transport.load(audio);
   const player = new ChartPlayer(app.engine, app.kit, transport);
   player.setOffset(pkg.meta.offset);
+  /** Click track while recording (beats from the take's start). */
+  const metro = new Metronome(app.engine, transport);
+  metro.setOffset(pkg.meta.offset);
+  metro.setEnabled(studioState.metronome);
+  /** Count-in clicks live on a metronome of their own: the scheduled one would cancel them when the transport (re)starts. */
+  const countInMetro = new Metronome(app.engine, transport);
   transport.onEnded = () => {
+    if (rec) stopRecording();
     player.stop();
     updatePlayBtn();
   };
   const chartTime = () => transport.position - pkg.meta.offset;
 
   function togglePlay(): void {
+    if (rec) return stopRecording();
     if (transport.playing) {
       transport.pause();
       player.stop();
@@ -173,10 +226,91 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     updatePlayBtn();
   }
   function seekChart(t: number): void {
+    if (rec) stopRecording();
     transport.seek(Math.max(0, Math.min(audio.duration, t + pkg.meta.offset)));
     player.resync();
     revealPlayhead(chartTime());
     draw();
+  }
+
+  // ── recording ──
+  let rec: Recording | null = null;
+  let recReplace = false;
+  /** Tempo and metre in force at chart time `t` (the tempo map is sorted; the first entry is at tick 0). */
+  const tempoAt = (t: number): { beatsPerBar: number; beatSec: number } => {
+    let bpm = base.tempoMap[0]?.bpm ?? pkg.meta.bpm;
+    for (const ev of base.tempoMap) if (ev.time <= t) bpm = ev.bpm;
+    const tick = secondsToTicks(Math.max(0, t), base.tempoMap, base.ppq);
+    let sig = base.timeSignatures[0] ?? { tick: 0, numerator: 4, denominator: 4 };
+    for (const ts of base.timeSignatures) if (ts.tick <= tick) sig = ts;
+    return { beatsPerBar: sig.numerator, beatSec: (60 / bpm) * (4 / sig.denominator) };
+  };
+  /** Nearest beat to `t` (recording starts on a beat so the count-in lands on the grid). */
+  const snapToBeat = (t: number): number => {
+    const step = base.ppq;
+    const tick = secondsToTicks(Math.max(0, t), base.tempoMap, base.ppq);
+    return ticksToSeconds(Math.round(tick / step) * step, base.tempoMap, base.ppq);
+  };
+  async function startRecording(): Promise<void> {
+    if (rec) return;
+    if (transport.playing) {
+      transport.pause();
+      player.stop();
+    }
+    const startT = Math.max(0, snapToBeat(chartTime()));
+    if (startT + pkg.meta.offset >= audio.duration - 0.5) return toast('The playhead is at the end of the song — seek back first', 'bad');
+    await Promise.all([metro.prepare(), countInMetro.prepare()]);
+    if (rec) return; // started twice while the clicks rendered
+    const { beatsPerBar, beatSec } = tempoAt(startT);
+    const bars = Math.max(0, studioState.countInBars);
+    const at = app.engine.ctx.currentTime + 0.05;
+    const songAt = bars ? countInMetro.countIn(bars, 60 / beatSec, at, beatsPerBar) : at;
+    rec = { startT, beatSec, replace: recReplace, takeIds: new Set(), changed: false };
+    app.input.keyboard.setEnabled(true); // keyboard drums record too; editor shortcuts pause until the take ends
+    transport.play(startT + pkg.meta.offset, songAt);
+    player.start();
+    metro.start();
+    setFollow(true);
+    pinPlayhead(chartTime());
+    updatePlayBtn();
+    draw();
+  }
+  function stopRecording(): void {
+    const r = rec;
+    if (!r) return;
+    rec = null;
+    app.input.keyboard.setEnabled(false);
+    countInMetro.stop();
+    metro.stop();
+    transport.pause();
+    player.stop();
+    if (transport.position < r.startT + pkg.meta.offset) transport.seek(r.startT + pkg.meta.offset);
+    commit();
+    updatePlayBtn();
+    const n = r.takeIds.size;
+    if (n || r.changed) toast(`Take done — ${n} note${n === 1 ? '' : 's'} recorded${r.replace ? ' (replaced what was there)' : ''}`, 'ok');
+    else toast('Take done — nothing recorded');
+  }
+  /** Undo point for the whole take, pushed on its first change. */
+  const takeTouched = (): void => {
+    if (!rec || rec.changed) return;
+    rec.changed = true;
+    pushUndo();
+  };
+  /** REPLACE: wipe pre-existing notes the playhead has reached (a little ahead, so they are not heard first). */
+  function replaceUnderPlayhead(): void {
+    if (!rec || !rec.replace) return;
+    const t = chartTime();
+    if (t < rec.startT) return;
+    const until = t + REPLACE_LOOKAHEAD;
+    const doomed = notes.filter((n) => !rec!.takeIds.has(n.id) && n.time >= rec!.startT && n.time < until);
+    if (!doomed.length) return;
+    takeTouched();
+    const ids = new Set(doomed.map((n) => n.id));
+    notes = notes.filter((n) => !ids.has(n.id));
+    for (const id of ids) selected.delete(id);
+    player.setNotes(notes);
+    updateStatus();
   }
 
   // ── helpers ──
@@ -411,18 +545,59 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
       ctx.strokeRect(x0, y0, Math.abs(drag.x1 - drag.x0), Math.abs(drag.y1 - drag.y0));
     }
 
+    // recording: tint the region taken so far; count the beats down before it starts
+    if (rec) {
+      const x0 = Math.max(LABEL_W, xOf(rec.startT));
+      const x1 = Math.min(W, xOf(Math.max(rec.startT, t)));
+      if (x1 > x0) {
+        ctx.fillStyle = 'rgba(255,59,59,0.10)';
+        ctx.fillRect(x0, RULER_H, x1 - x0, H - RULER_H);
+      }
+      ctx.strokeStyle = 'rgba(255,59,59,0.8)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(xOf(rec.startT), RULER_H);
+      ctx.lineTo(xOf(rec.startT), H);
+      ctx.stroke();
+      if (t < rec.startT) {
+        const beatsLeft = Math.ceil((rec.startT - t) / rec.beatSec - 1e-6);
+        const label = `COUNT-IN ${beatsLeft}`;
+        ctx.font = '700 22px "Space Grotesk", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        const w = ctx.measureText(label).width + 24;
+        ctx.fillRect((LABEL_W + W) / 2 - w / 2, RULER_H + 12, w, 36);
+        ctx.fillStyle = '#ff3b3b';
+        ctx.fillText(label, (LABEL_W + W) / 2, RULER_H + 30);
+        ctx.textBaseline = 'alphabetic';
+      }
+    }
+
     // playhead
     const px = xOf(t);
     if (px >= LABEL_W && px <= W) {
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 2;
-      ctx.shadowColor = '#fff';
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.moveTo(px, 0);
-      ctx.lineTo(px, H);
-      ctx.stroke();
-      ctx.shadowBlur = 0;
+      if (rec) {
+        ctx.strokeStyle = '#ff3b3b';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = '#ff3b3b';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, H);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      } else {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.shadowColor = '#fff';
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, H);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
     }
 
     // labels column (drawn last so it covers scrolled content)
@@ -457,9 +632,10 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
       drawBtn(MIX_X_S, 'S', soloed.has(voice), '#ffe600');
     });
     ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillStyle = rec ? '#ff3b3b' : 'rgba(255,255,255,0.5)';
     ctx.font = '10px "JetBrains Mono", monospace';
-    ctx.fillText(fmtTime(Math.max(0, t)), 12, 17);
+    ctx.textAlign = 'left';
+    ctx.fillText(`${rec ? '● REC ' : ''}${fmtTime(Math.max(0, t))}`, 12, 17);
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.beginPath();
     ctx.moveTo(LABEL_W + 0.5, 0);
@@ -693,6 +869,17 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA')) return;
     const meta = e.metaKey || e.ctrlKey;
+    if (rec) {
+      // While recording the keys are drums; only Esc / R (stop) and ⌘S keep their meaning.
+      if (e.code === 'Escape' || (e.code === 'KeyR' && !meta)) {
+        e.preventDefault();
+        stopRecording();
+      } else if (meta && e.code === 'KeyS') {
+        e.preventDefault();
+        opts.onSave?.();
+      }
+      return;
+    }
     if (e.code === 'Space') {
       e.preventDefault();
       togglePlay();
@@ -734,8 +921,18 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
       scrollT = -1;
       draw();
     } else if (e.code === 'Escape') {
-      selected.clear();
-      draw();
+      if (rec) stopRecording();
+      else {
+        selected.clear();
+        draw();
+      }
+    } else if (e.code === 'KeyR' && !meta) {
+      e.preventDefault();
+      if (rec) stopRecording();
+      else void startRecording();
+    } else if (e.code === 'KeyQ' && !meta) {
+      e.preventDefault();
+      quantizeSelected();
     } else if (e.code === 'Equal' || e.code === 'Minus') {
       pps = Math.max(MIN_PPS, Math.min(MAX_PPS, pps * (e.code === 'Equal' ? 1.25 : 0.8)));
       draw();
@@ -793,6 +990,22 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     pasted.forEach((n) => selected.add(n.id));
     commit();
   }
+  /** Snap every selected note to the grid (an after-the-fact quantize for takes recorded with snap off). */
+  function quantizeSelected(): void {
+    if (!selected.size) return toast('Select the notes to quantize first');
+    if (!gridStepTicks(grid, base.ppq)) return toast('Pick a snap grid first (Snap is off)', 'bad');
+    let moved = 0;
+    for (const n of notes) {
+      if (!selected.has(n.id)) continue;
+      const t = Math.max(0, snapTime(n.time));
+      if (Math.abs(t - n.time) >= SAME_SPOT) moved++;
+    }
+    if (!moved) return toast('Already on the grid');
+    pushUndo();
+    for (const n of notes) if (selected.has(n.id)) n.time = Math.max(0, snapTime(n.time));
+    commit();
+    toast(`Quantized ${moved} note${moved === 1 ? '' : 's'} to ${grid}`, 'ok');
+  }
   function setSelectedVelocity(v: number): void {
     if (!selected.size) return;
     pushUndo();
@@ -800,18 +1013,23 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     commit();
   }
 
-  // ── pad input: hits while playing insert notes at the playhead; while paused they preview ──
+  // ── pad input: while recording (or playing with PADS ADD NOTES on) hits insert notes at the playhead; while paused they preview ──
   const unsubHits = app.input.onHit((hit) => {
     if (!transport.playing) {
       app.kit.trigger(hit.voice, hit.velocity);
       return;
     }
-    if (!padInput) return;
+    if (app.settings.drumSoundsOnHit) app.kit.trigger(hit.voice, hit.velocity);
+    if (!rec && !padInput) return;
     const pos = transport.positionAtPerfTime(hit.timeStamp) - pkg.meta.offset + app.settings.inputOffset - app.engine.inputLatencyCompensation;
+    if (rec && pos < rec.startT) return; // count-in
     const t = Math.max(0, snapTime(pos));
     if (noteAtTime(hit.voice, t)) return;
-    pushUndo();
-    notes.push({ id: nextId++, time: t, voice: hit.voice, velocity: hit.velocity });
+    if (rec) takeTouched();
+    else pushUndo();
+    const n: EditNote = { id: nextId++, time: t, voice: hit.voice, velocity: hit.velocity };
+    notes.push(n);
+    rec?.takeIds.add(n.id);
     commit();
   });
 
@@ -876,9 +1094,29 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
 
   // ── toolbar ──
   const playBtn = button('▶ PLAY', togglePlay, 'primary');
+  const recBtn = button('● REC', () => { if (rec) stopRecording(); else void startRecording(); }, 'danger');
+  recBtn.title = 'Record: a count-in, then every pad hit lands on the chart (R)';
   const updatePlayBtn = () => {
     playBtn.textContent = transport.playing ? '■ STOP' : '▶ PLAY';
+    recBtn.textContent = rec ? '■ STOP REC' : '● REC';
+    recBtn.classList.toggle('recording', !!rec);
   };
+  const clickBtn = button(`CLICK: ${studioState.metronome ? 'ON' : 'OFF'}`, () => {
+    studioState.metronome = !studioState.metronome;
+    metro.setEnabled(studioState.metronome);
+    clickBtn.textContent = `CLICK: ${studioState.metronome ? 'ON' : 'OFF'}`;
+  }, 'icon small');
+  clickBtn.title = 'Metronome while recording (the count-in always clicks)';
+  const countSel = select([0, 1, 2, 4].map((n) => ({ value: String(n), label: n ? `Count-in: ${n} bar${n > 1 ? 's' : ''}` : 'Count-in: none' })), String(studioState.countInBars), (v) => { studioState.countInBars = Number(v); });
+  const recModeBtn = button('REC: OVERDUB', () => {
+    recReplace = !recReplace;
+    if (rec) rec.replace = recReplace;
+    recModeBtn.textContent = `REC: ${recReplace ? 'REPLACE' : 'OVERDUB'}`;
+  }, 'icon small');
+  recModeBtn.title = 'OVERDUB adds to what is there; REPLACE wipes existing notes as the playhead passes them';
+  const drumsBtn = button('MIX: NO DRUMS', () => setMix(mix === 'drums' ? 'audio' : 'drums'), 'icon small');
+  drumsBtn.title = 'Switch between the drum-less mix the game plays and the reference mix with drums';
+  drumsBtn.hidden = !opts.drumsAudio;
   const status = h('span', { class: 'mono small dim' });
   const deleteChartBtn = button('DELETE CHART', () => void deleteChart(), 'danger small');
   deleteChartBtn.title = 'Remove this difficulty\'s chart file from the song (asks first)';
@@ -905,13 +1143,14 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   const padBtn = button('PADS ADD NOTES: ON', () => { padInput = !padInput; padBtn.textContent = `PADS ADD NOTES: ${padInput ? 'ON' : 'OFF'}`; }, 'icon small');
   const songBtn = button('SONG: ON', () => { songAudio = !songAudio; transport.setGain(songAudio ? 1 : 0); songBtn.textContent = `SONG: ${songAudio ? 'ON' : 'OFF'}`; songBtn.classList.toggle('danger', !songAudio); }, 'icon small');
   songBtn.title = 'Mute / unmute the song audio (hear the drums on their own)';
-  const mixBtn = button('CLEAR M/S', clearMix, 'icon small');
-  mixBtn.title = 'Clear every row MUTE / SOLO';
-  const updateMixBtn = () => { mixBtn.hidden = !muted.size && !soloed.size; };
+  const clearMsBtn = button('CLEAR M/S', clearMix, 'icon small');
+  clearMsBtn.title = 'Clear every row MUTE / SOLO';
+  const updateMixBtn = () => { clearMsBtn.hidden = !muted.size && !soloed.size; };
   updateMixBtn();
 
   const toolbar = h('div', { class: 'editor-toolbar' },
     playBtn,
+    recBtn,
     button('⏮', () => { seekChart(0); scrollT = -1; draw(); }, 'icon'),
     diffSel,
     gridSel,
@@ -922,21 +1161,30 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     button('DUPLICATE', duplicateSelected, 'icon small'),
     button('COPY', copySelected, 'icon small'),
     button('PASTE', pasteAtPlayhead, 'icon small'),
+    button('QUANTIZE', quantizeSelected, 'icon small'),
     button('−', () => { pps = Math.max(MIN_PPS, pps * 0.8); draw(); }, 'icon small'),
     button('+', () => { pps = Math.min(MAX_PPS, pps * 1.25); draw(); }, 'icon small'),
     followBtn,
     padBtn,
     songBtn,
-    mixBtn,
+    drumsBtn,
+    clearMsBtn,
+  );
+  const recBar = h('div', { class: 'editor-toolbar rec-bar' },
+    h('span', { class: 'small dim' }, 'Recording'),
+    countSel,
+    clickBtn,
+    recModeBtn,
+    h('span', { class: 'small mute' }, 'Hits snap to the grid above (Snap: off keeps your timing — QUANTIZE later). The take starts on the beat nearest the playhead.'),
   );
   const footer = h('div', { class: 'editor-footer' }, status, h('span', { class: 'spacer' }), deleteChartBtn, ...(opts.actions ?? []));
   const help = h('div', { class: 'small mute editor-help' },
     'Click empty space = add note (drops the old selection) · drag a note sideways = move, up/down = velocity · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
-    h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing · M / S on a row = mute / solo that drum (alt-click S = solo only it) · SONG = mute the song audio',
+    h('kbd', null, 'Space'), ' play · ', h('kbd', null, 'R'), ' record / stop (keyboard drums work while recording) · ', h('kbd', null, 'Q'), ' quantize selection · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while recording (or playing with PADS ADD NOTES on) · M / S on a row = mute / solo that drum (alt-click S = solo only it) · SONG = mute the song audio · MIX = switch to the mix with drums',
   );
 
   const wrap = h('div', { class: 'editor-wrap' }, canvas);
-  const el = h('div', { class: 'chart-editor' }, toolbar, wrap, footer, help);
+  const el = h('div', { class: 'chart-editor' }, toolbar, recBar, wrap, footer, help);
 
   await loadDifficulty(difficulty);
   canvas.addEventListener('pointerdown', onPointerDown);
@@ -950,12 +1198,15 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   ro.observe(wrap);
   let raf = 0;
   const tick = () => {
-    if (transport.playing) draw();
+    if (transport.playing) {
+      replaceUnderPlayhead();
+      draw();
+    }
     raf = requestAnimationFrame(tick);
   };
   tick();
   app.input.keyboard.setEnabled(false); // editor owns the keyboard
-  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; }, get muted() { return muted; }, get soloed() { return soloed; }, deleteChart, get derived() { return derived; }, get muteVoices() { return player.muteVoices; }, toggleMute, toggleSolo, clearMix, get songAudio() { return songAudio; } };
+  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; }, get muted() { return muted; }, get soloed() { return soloed; }, deleteChart, get derived() { return derived; }, get muteVoices() { return player.muteVoices; }, toggleMute, toggleSolo, clearMix, get songAudio() { return songAudio; }, startRecording, stopRecording, get recording() { return rec; }, setMix, get mix() { return mix; }, quantizeSelected, get hasDrumsMix() { return !!opts.drumsAudio; } };
 
   return {
     el,
@@ -966,6 +1217,9 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     dispose: () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      rec = null;
+      countInMetro.stop();
+      metro.stop();
       transport.stop();
       player.stop();
       unsubHits();

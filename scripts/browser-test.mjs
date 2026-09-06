@@ -59,6 +59,14 @@ const click = (text) => evaluate(`(() => { const b = Array.from(document.querySe
 function fail(msg) { console.error('✗', msg); cleanup(); setTimeout(() => process.exit(1), 800); throw new Error(msg); }
 function cleanup() { try { ws.close(); } catch { /* ignore */ } chrome.kill(); setTimeout(() => { try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* ignore */ } }, 500); }
 const assert = (cond, msg) => { if (!cond) fail(msg); console.log('✓', msg); };
+/** Scripted auto-player: presses the keyboard binding for each chart note as it reaches the strike line. */
+const AUTOPLAY = `(() => {
+    const keys = { kick:'Space', snare:'KeyF', tomHigh:'KeyG', tomMid:'KeyH', tomLow:'KeyK', hihatClosed:'KeyD', hihatOpen:'KeyS', ride:'KeyL', crash:'KeyA' };
+    const s = window.dkSession; const notes = s.judge.notes; let i = 0;
+    (function tick() { if (!window.dkSession || window.dkSession !== s) return; const t = s.chartTime;
+      while (i < notes.length && notes[i].time <= t + 0.004) { const n = notes[i++]; if (n.time < t - 0.1) continue;
+        window.dispatchEvent(new KeyboardEvent('keydown', { code: keys[n.voice], bubbles: true })); window.dispatchEvent(new KeyboardEvent('keyup', { code: keys[n.voice], bubbles: true })); }
+      requestAnimationFrame(tick); })(); })()`;
 
 try {
   await send('Runtime.enable');
@@ -81,13 +89,7 @@ try {
   await sleep(4000);
   const notes = await evaluate(`window.dkSession?.judge.notes.length ?? 0`);
   assert(notes > 500, `game session started with ${notes} expert notes`);
-  await evaluate(`
-    const keys = { kick:'Space', snare:'KeyF', tomHigh:'KeyG', tomMid:'KeyH', tomLow:'KeyK', hihatClosed:'KeyD', hihatOpen:'KeyS', ride:'KeyL', crash:'KeyA' };
-    const s = window.dkSession; const notes = s.judge.notes; let i = 0;
-    (function tick() { if (!window.dkSession) return; const t = s.chartTime;
-      while (i < notes.length && notes[i].time <= t + 0.004) { const n = notes[i++]; if (n.time < t - 0.1) continue;
-        window.dispatchEvent(new KeyboardEvent('keydown', { code: keys[n.voice], bubbles: true })); window.dispatchEvent(new KeyboardEvent('keyup', { code: keys[n.voice], bubbles: true })); }
-      requestAnimationFrame(tick); })();`);
+  await evaluate(AUTOPLAY);
   await sleep(12000);
   await shot('03-gameplay.png');
   const j = await evaluate(`JSON.stringify({ score: dkSession.judge.score, combo: dkSession.judge.maxCombo, acc: dkSession.judge.accuracy, hits: dkSession.judge.hits, over: dkSession.judge.overhits, err: dkSession.judge.meanSignedError })`).then(JSON.parse);
@@ -110,8 +112,8 @@ try {
   await click('PLAY');
   await sleep(5000);
   assert(await evaluate(`!!document.querySelector('.hud .cam-preview') && document.querySelector('.hud .cam-preview').videoWidth > 0`), 'webcam preview is live in the HUD');
-  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF', bubbles: true }))`);
-  await sleep(2500);
+  await evaluate(AUTOPLAY);
+  await sleep(4000);
   await shot('04-recording.png');
   await evaluate(`window.dkSession.finishNow()`);
   await sleep(2500);
@@ -132,6 +134,52 @@ try {
   fs.writeFileSync(path.join(outDir, '05-recording-frame.png'), Buffer.from(vid.png, 'base64'));
   await shot('06-results-video.png');
   await evaluate(`window.dk.settingsStore.update({ recordVideo: false })`);
+
+  // ── timing heatmap on the results screen ──
+  const heat = await evaluate(`(() => { const c = document.querySelector('.heatmap canvas'); if (!c) return null;
+    const ctx = c.getContext('2d'); const d = ctx.getImageData(0, 0, c.width, c.height).data; let lit = 0;
+    for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 120) lit++;
+    return { w: c.width, h: c.height, lit, legend: document.querySelector('.heatmap .legend')?.textContent ?? '' }; })()`);
+  assert(heat && heat.w > 100 && heat.lit > 200, `results screen draws the timing heatmap (${heat ? heat.lit + ' lit px, ' + heat.legend : 'none'})`);
+  await shot('07-heatmap.png');
+
+  // ── studio: record onto the chart in the editor ──
+  await click('TITLE');
+  await sleep(500);
+  await evaluate(`window.dk.navigate('studio')`);
+  await sleep(1500);
+  assert((await evaluate(`Array.from(document.querySelectorAll('.tab .label')).map(e => e.textContent)`)).join() === '', 'studio opens on the song picker (no tabs yet)');
+  await evaluate(`Array.from(document.querySelectorAll('.song-row')).find(r => r.textContent.includes('Back Pocket')).querySelector('.btn').click()`);
+  await sleep(3000);
+  const tabs = await evaluate(`Array.from(document.querySelectorAll('.tab .label')).map(e => e.textContent)`);
+  assert(tabs.join(',') === 'SONG,CHART', `studio has SONG and CHART tabs only (${tabs.join(',')})`);
+  assert((await evaluate(`document.querySelectorAll('.audio-slot').length`)) === 2, 'SONG tab lists both audio slots (without / with drums)');
+  await evaluate(`Array.from(document.querySelectorAll('.tab')).find(t => t.textContent.includes('CHART')).click()`);
+  await sleep(2500);
+  assert(await evaluate(`!!window.dkEditor && !window.dkEditor.hasDrumsMix`), 'chart editor open (bundled song has no with-drums mix, so no MIX button)');
+  assert(await evaluate(`document.querySelector('.editor-toolbar .btn.danger')?.textContent === '● REC'`), 'editor toolbar has the REC button');
+  await evaluate(`window.dk.settingsStore.update({ drumSoundsOnHit: true })`);
+  const before = await evaluate(`window.dkEditor.notes.length`);
+  await evaluate(`window.dkEditor.transport.seek(8 + ${0}); window.dkEditor.startRecording()`);
+  await sleep(600);
+  assert(await evaluate(`!!window.dkEditor.recording && window.dkEditor.transport.playing`), 'recording started with the transport running through the count-in');
+  const startT = await evaluate(`window.dkEditor.recording.startT`);
+  // hits during the count-in are ignored; hits after it land on the chart
+  await evaluate(`window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyF', bubbles: true }))`);
+  await sleep(2600);
+  await evaluate(`(() => { const keys = ['Space', 'KeyF', 'KeyD', 'KeyF']; let i = 0; const id = setInterval(() => { const k = keys[i++ % keys.length]; window.dispatchEvent(new KeyboardEvent('keydown', { code: k, bubbles: true })); window.dispatchEvent(new KeyboardEvent('keyup', { code: k, bubbles: true })); if (i >= 12) clearInterval(id); }, 180); })()`);
+  await sleep(2600);
+  await shot('08-editor-recording.png');
+  const take = await evaluate(`JSON.stringify({ n: window.dkEditor.recording.takeIds.size, t: window.dkEditor.transport.position })`).then(JSON.parse);
+  assert(take.n >= 8, `pad hits were written onto the chart while recording (${take.n} notes, count-in started at ${startT.toFixed(2)}s)`);
+  await evaluate(`window.dkEditor.stopRecording()`);
+  await sleep(300);
+  const after = await evaluate(`JSON.stringify({ n: window.dkEditor.notes.length, rec: !!window.dkEditor.recording, playing: window.dkEditor.transport.playing, dirty: window.dkEditor.dirty, early: window.dkEditor.notes.filter(n => n.time < ${startT} - 0.01).length })`).then(JSON.parse);
+  assert(!after.rec && !after.playing && after.dirty && after.n >= before + 8, `stop ends the take; chart grew from ${before} to ${after.n} notes and is dirty`);
+  assert(await evaluate(`window.dkEditor.notes.filter(n => n.time >= ${startT}).length >= 8`), 'take notes all land at or after the take start (count-in hits ignored)');
+  await evaluate(`window.dk.settingsStore.update({ drumSoundsOnHit: false })`);
+  await click('BACK'); // (CLOSE would ask to confirm discarding the take — a modal dialog hangs headless Chrome)
+  await sleep(300);
   const errors = logs.filter((l) => !l.includes('favicon'));
   assert(errors.length === 0, `no console errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
   console.log(`\nAll good. Screenshots in ${outDir}`);

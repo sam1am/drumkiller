@@ -10,6 +10,8 @@ import { DIFFICULTIES, DRUM_VOICES } from '@/types';
 // ─────────────────────────── Constants ───────────────────────────
 
 export const SONG_META_FILENAME = 'song.json';
+/** File name (without extension) the studio gives the optional with-drums mix. */
+export const DRUMS_AUDIO_BASENAME = 'audio-drums';
 
 export const AUDIO_EXTENSIONS = ['mp3', 'wav', 'flac', 'aac', 'm4a', 'ogg'] as const;
 export const SAMPLE_EXTENSIONS = ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'] as const;
@@ -175,6 +177,7 @@ export function parseSongMeta(json: unknown): SongMeta {
   // audio
   const audio = optRelPath(obj, 'audio');
   if (audio === undefined) fail('"audio" is required (relative path to the drum-less mix, e.g. "audio.mp3")');
+  const audioWithDrums = optRelPath(obj, 'audioWithDrums');
 
   // charts
   const charts: Partial<Record<Difficulty, string>> = {};
@@ -241,6 +244,7 @@ export function parseSongMeta(json: unknown): SongMeta {
   const album = optString(obj, 'album')?.trim();
   const charter = optString(obj, 'charter')?.trim();
   const genre = optString(obj, 'genre')?.trim();
+  if (audioWithDrums) meta.audioWithDrums = audioWithDrums;
   if (album) meta.album = album;
   if (year !== undefined) meta.year = year;
   if (charter) meta.charter = charter;
@@ -269,6 +273,7 @@ export function serializeSongMeta(meta: SongMeta): string {
     offset: meta.offset,
     length: meta.length,
     audio: meta.audio,
+    audioWithDrums: meta.audioWithDrums,
     charts: meta.charts,
     samples: meta.samples,
     sampleGain: meta.sampleGain,
@@ -323,6 +328,7 @@ async function assemblePackage(entries: RawEntry[], source: SongPackage['source'
 /** Referenced-but-absent relative paths (audio, charts, samples, artwork). */
 export function missingFiles(pkg: SongPackage): string[] {
   const refs: string[] = [pkg.meta.audio];
+  if (pkg.meta.audioWithDrums) refs.push(pkg.meta.audioWithDrums);
   for (const p of Object.values(pkg.meta.charts)) if (p) refs.push(p);
   for (const p of Object.values(pkg.meta.samples ?? {})) if (p) refs.push(p);
   if (pkg.meta.artwork) refs.push(pkg.meta.artwork);
@@ -404,10 +410,13 @@ export async function loadSongFromUrl(baseUrl: string, opts: LoadFromUrlOptions 
   };
 
   const jobs: Promise<void>[] = [fetchInto(meta.audio, true)];
+  if (meta.audioWithDrums) jobs.push(fetchInto(meta.audioWithDrums, false));
   for (const p of Object.values(meta.charts)) if (p) jobs.push(fetchInto(p, true));
   for (const p of Object.values(meta.samples ?? {})) if (p) jobs.push(fetchInto(p, false));
   if (meta.artwork) jobs.push(fetchInto(meta.artwork, false));
   await Promise.all(jobs);
+  // The with-drums mix is a studio nicety: a song whose copy is missing is still a complete song.
+  if (meta.audioWithDrums && !files.has(meta.audioWithDrums)) delete meta.audioWithDrums;
 
   return { meta, files, source: 'bundled', baseUrl: base };
 }
@@ -435,6 +444,11 @@ export function getFile(pkg: SongPackage, relPath: string): Blob | undefined {
 
 export function getAudioBlob(pkg: SongPackage): Blob | undefined {
   return getFile(pkg, pkg.meta.audio);
+}
+
+/** The optional mix with drums, or undefined when the song does not ship one. */
+export function getDrumsAudioBlob(pkg: SongPackage): Blob | undefined {
+  return pkg.meta.audioWithDrums ? getFile(pkg, pkg.meta.audioWithDrums) : undefined;
 }
 
 export function getChartBlob(pkg: SongPackage, difficulty: Difficulty): Blob | undefined {
@@ -494,6 +508,8 @@ export interface CreateSongPackageOptions {
   meta: Partial<SongMeta> & { title: string; artist: string; bpm: number };
   audio: Blob;
   audioFileName: string;
+  /** Optional mix with the drums in it (studio reference track). */
+  audioWithDrums?: { blob: Blob; fileName: string };
   charts?: Partial<Record<Difficulty, Blob>>;
   samples?: Partial<Record<DrumVoice, { blob: Blob; fileName: string }>>;
   artwork?: { blob: Blob; fileName: string };
@@ -509,7 +525,7 @@ function extOrThrow(fileName: string, allowed: readonly string[], what: string):
 
 /**
  * Build a brand-new song folder in memory. Layout produced:
- *   audio.<ext>, <difficulty>.mid, samples/<voice>.<ext>, artwork.<ext>, song.json (virtual — from meta)
+ *   audio.<ext>, audio-drums.<ext>, <difficulty>.mid, samples/<voice>.<ext>, artwork.<ext>, song.json (virtual — from meta)
  */
 export function createSongPackage(opts: CreateSongPackageOptions): SongPackage {
   const files = new Map<string, Blob>();
@@ -517,6 +533,13 @@ export function createSongPackage(opts: CreateSongPackageOptions): SongPackage {
   const audioExt = extOrThrow(opts.audioFileName, AUDIO_EXTENSIONS, 'audio');
   const audioPath = `audio.${audioExt}`;
   files.set(audioPath, opts.audio);
+
+  let audioWithDrums: string | undefined;
+  if (opts.audioWithDrums) {
+    const ext = extOrThrow(opts.audioWithDrums.fileName, AUDIO_EXTENSIONS, 'audio (with drums)');
+    audioWithDrums = `${DRUMS_AUDIO_BASENAME}.${ext}`;
+    files.set(audioWithDrums, opts.audioWithDrums.blob);
+  }
 
   const charts: Partial<Record<Difficulty, string>> = {};
   for (const d of DIFFICULTIES) {
@@ -548,6 +571,7 @@ export function createSongPackage(opts: CreateSongPackageOptions): SongPackage {
     ...opts.meta,
     format: 1,
     audio: audioPath,
+    audioWithDrums,
     charts,
     samples,
     artwork,

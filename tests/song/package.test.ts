@@ -322,3 +322,41 @@ describe('loadSongFromUrl', () => {
     await expect(loadSongFromUrl('/s', { fetchFn: fakeFetch({}) })).rejects.toThrow(/song.json.*404/);
   });
 });
+
+describe('audioWithDrums (optional mix with drums)', () => {
+  it('parses, serializes and is optional', () => {
+    const meta = parseSongMeta({ title: 'T', bpm: 100, audio: 'audio.mp3', audioWithDrums: './audio-drums.mp3' });
+    expect(meta.audioWithDrums).toBe('audio-drums.mp3');
+    expect(parseSongMeta(JSON.parse(serializeSongMeta(meta)))).toEqual(meta);
+    expect(parseSongMeta({ title: 'T', bpm: 100, audio: 'audio.mp3' }).audioWithDrums).toBeUndefined();
+    expect(() => parseSongMeta({ title: 'T', bpm: 100, audio: 'a.mp3', audioWithDrums: '../x.mp3' })).toThrow(/\.\./);
+  });
+
+  it('createSongPackage lays it out as audio-drums.<ext> and missingFiles tracks it', () => {
+    const pkg = createSongPackage({ meta: { title: 't', artist: 'a', bpm: 100 }, audio: blob('x'), audioFileName: 'x.wav', audioWithDrums: { blob: blob('with drums'), fileName: 'Full Mix.MP3' } });
+    expect(pkg.meta.audioWithDrums).toBe('audio-drums.mp3');
+    expect(getFile(pkg, 'audio-drums.mp3')).toBeDefined();
+    expect(missingFiles(pkg)).toEqual([]);
+    pkg.files.delete('audio-drums.mp3');
+    expect(missingFiles(pkg)).toEqual(['audio-drums.mp3']);
+    expect(() =>
+      createSongPackage({ meta: { title: 't', artist: 'a', bpm: 100 }, audio: blob('x'), audioFileName: 'x.wav', audioWithDrums: { blob: blob('y'), fileName: 'y.wma' } }),
+    ).toThrow(/Unsupported audio \(with drums\)/);
+  });
+
+  it('loadSongFromUrl fetches it when listed and drops the reference when the file is absent', async () => {
+    const routes = (withDrums: boolean): Record<string, string> => ({
+      'http://x/s/song.json': JSON.stringify({ title: 'S', bpm: 100, audio: 'a.mp3', audioWithDrums: 'd.mp3', charts: { expert: 'e.mid' } }),
+      'http://x/s/a.mp3': 'A',
+      'http://x/s/e.mid': 'E',
+      ...(withDrums ? { 'http://x/s/d.mp3': 'D' } : {}),
+    });
+    const fetchFn = (r: Record<string, string>): FetchFn => async (url) => (url in r ? new Response(r[url], { status: 200 }) : new Response('nope', { status: 404 }));
+    const withIt = await loadSongFromUrl('http://x/s', { fetchFn: fetchFn(routes(true)) });
+    expect(withIt.meta.audioWithDrums).toBe('d.mp3');
+    expect(await text(withIt.files.get('d.mp3'))).toBe('D');
+    const without = await loadSongFromUrl('http://x/s', { fetchFn: fetchFn(routes(false)) });
+    expect(without.meta.audioWithDrums).toBeUndefined();
+    expect(missingFiles(without)).toEqual([]);
+  });
+});

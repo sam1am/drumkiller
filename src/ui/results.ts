@@ -1,9 +1,10 @@
 import type { App, Screen } from '@/app';
-import type { Difficulty, HighScore, ScoreSummary, SongPackage } from '@/types';
+import type { Difficulty, HighScore, HitWindows, ScoreSummary, SongPackage } from '@/types';
 import { h, button, fmtScore, pct, downloadBlob } from './dom';
 import { fileExtensionFor, type RecordedVideo } from '@/game/videoRecorder';
 import { topbar } from './topbar';
-import { starString } from '@/game/scoring';
+import { hitWindowsFor, starString } from '@/game/scoring';
+import { drawTimingHeatmap, timingSummary, type TimingHit } from '@/game/timingHeatmap';
 
 export function resultsScreen(app: App, params?: Record<string, unknown>): Screen {
   const pkg = params?.pkg as SongPackage;
@@ -22,6 +23,28 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
           : h('div', { class: 'small dim' }, 'Nice — your timing offset is dialled in.'),
       )
     : null;
+  // Timing heatmap: every judged hit at the strike line, early above / late below.
+  const hits = (params?.hits as TimingHit[] | undefined) ?? [];
+  const windows = (params?.windows as HitWindows | undefined) ?? hitWindowsFor(difficulty, app.settings.hitWindowScale);
+  let heatBox: HTMLElement | null = null;
+  let heatObserver: ResizeObserver | null = null;
+  if (hits.length) {
+    const ts = timingSummary(hits);
+    const ms = (s: number) => `${s > 0 ? '+' : ''}${Math.round(s * 1000)} ms`;
+    const heatCanvas = h('canvas', { class: 'heatmap-canvas' });
+    const redraw = () => drawTimingHeatmap(heatCanvas, { hits, windows, laneOrder: app.settings.laneOrder });
+    heatObserver = new ResizeObserver(redraw);
+    heatObserver.observe(heatCanvas);
+    heatBox = h('div', { class: 'heatmap' },
+      h('div', { class: 'small dim', style: { marginBottom: '6px' } }, 'TIMING HEATMAP — every hit piled up where it landed on the strike line: above = early, below = late'),
+      heatCanvas,
+      h('div', { class: 'legend' },
+        h('span', null, h('span', { class: 'swatch' }), 'fewer → more hits'),
+        h('span', null, `${ts.count} hits · mean ${ms(ts.mean)} · spread ±${Math.round(ts.spread * 1000)} ms`),
+        h('span', null, `${Math.round((ts.early / ts.count) * 100)}% early · ${Math.round((ts.late / ts.count) * 100)}% late`),
+      ),
+    );
+  }
   const video = params?.video as RecordedVideo | undefined;
   let videoUrl: string | null = null;
   let videoBox: HTMLElement | null = null;
@@ -81,6 +104,7 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
             bar('GOOD', summary.hits.good, 'var(--good)'),
             bar('MISS', summary.hits.miss, 'var(--miss)'),
           ),
+          heatBox,
           timingBox,
           videoBox,
           h('div', { class: 'btn-row', style: { marginTop: '24px' } },
@@ -105,6 +129,7 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
   return {
     el,
     dispose: () => {
+      heatObserver?.disconnect();
       if (videoUrl) URL.revokeObjectURL(videoUrl);
     },
   };

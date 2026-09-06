@@ -103,13 +103,35 @@ export class Transport {
     return this.anchorAudio + (songPos - this.anchorPos) / this._rate;
   }
 
-  /** Start playback from `fromSeconds` (defaults to the current paused position). Negative = pre-roll. */
-  play(fromSeconds?: number): void {
+  /**
+   * Start playback from `fromSeconds` (defaults to the current paused position). Negative = pre-roll.
+   * `atAudioTime` schedules the start on the audio clock (a count-in): until then the transport counts
+   * as playing, `position` runs up towards `fromSeconds` and no audio is heard.
+   */
+  play(fromSeconds?: number, atAudioTime?: number): void {
     if (!this.buffer) throw new Error('Transport.play: no buffer loaded');
     const from = fromSeconds ?? this.pausedPos;
     this.killSource();
     this._playing = true;
-    this.startSourceAt(from, this.engine.ctx.currentTime + 0.005);
+    const soonest = this.engine.ctx.currentTime + 0.005;
+    this.startSourceAt(from, atAudioTime === undefined ? soonest : Math.max(soonest, atAudioTime));
+  }
+
+  /**
+   * Replace the audio without losing the place: swaps to `buffer` at the current position, mid-playback
+   * if need be (the two buffers are expected to line up, e.g. a mix with and without drums).
+   */
+  swapBuffer(buffer: AudioBuffer): void {
+    if (!this._playing) {
+      this.buffer = buffer;
+      this.pausedPos = Math.min(this.pausedPos, buffer.duration);
+      return;
+    }
+    const at = this.engine.ctx.currentTime + 0.005;
+    const pos = this.positionAtAudioTime(at);
+    this.killSource();
+    this.buffer = buffer;
+    this.startSourceAt(pos, at);
   }
 
   pause(): void {

@@ -128,8 +128,10 @@ export interface SongMeta {
   bpm: number;
   /** Seconds of audio that play before chart tick 0. audioTime = chartTime + offset. May be negative. */
   offset: number;
-  /** Audio file relative path (mp3/wav/flac/aac/ogg/m4a). Drum-less mix. */
+  /** Audio file relative path (mp3/wav/flac/aac/ogg/m4a). Drum-less mix — what the game plays. */
   audio: string;
+  /** Optional second mix WITH the drums (same start instant as `audio`). Used by the studio's chart editor as a reference. */
+  audioWithDrums?: string;
   /** Per-difficulty chart MIDI files. Missing difficulties are derived from the hardest available one. */
   charts: Partial<Record<Difficulty, string>>;
   /** Optional custom drum samples (relative paths). Missing voices fall back to the built-in kit. */

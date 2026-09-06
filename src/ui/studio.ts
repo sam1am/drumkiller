@@ -1,9 +1,9 @@
 import type { App, Screen } from '@/app';
-import { DIFFICULTIES, DRUM_VOICES, VOICE_LABELS, type Chart, type Difficulty, type DrumVoice, type QuantizeOptions, type SongListEntry, type SongPackage } from '@/types';
-import { chartToMidi, writeMidi, performanceToChart, quantizePerformance, QUANTIZE_GRIDS, constantTempoMap, DEFAULT_PPQ, chartStats, difficultyRating, deriveDifficulty } from '@/midi';
-import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS, AUDIO_EXTENSIONS, playableDifficulties } from '@/song';
-import { Transport, ChartPlayer, Metronome } from '@/audio';
-import { h, button, field, toast, clear, downloadBlob, pickFile, select, fmtTime, modal } from './dom';
+import { DIFFICULTIES, DRUM_VOICES, VOICE_LABELS, type Chart, type Difficulty, type SongListEntry, type SongPackage } from '@/types';
+import { chartToMidi, writeMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
+import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS, AUDIO_EXTENSIONS, DRUMS_AUDIO_BASENAME, playableDifficulties } from '@/song';
+import { Transport, Metronome } from '@/audio';
+import { h, button, field, toast, clear, downloadBlob, pickFile, fmtTime, modal } from './dom';
 import { topbar } from './topbar';
 import { studioState, type StudioTab } from './studioState';
 import { VOICE_COLORS } from '@/game/renderer';
@@ -23,9 +23,8 @@ function midiBlob(chart: Chart, trackName: string): Blob {
 }
 
 const TABS: { id: StudioTab; label: string; hint: string }[] = [
-  { id: 'song', label: 'SONG', hint: 'details · tempo & offset · samples' },
-  { id: 'record', label: 'RECORD', hint: 'play a take on your pads' },
-  { id: 'chart', label: 'CHART', hint: 'edit the notes' },
+  { id: 'song', label: 'SONG', hint: 'details · tempo & offset · audio · samples' },
+  { id: 'chart', label: 'CHART', hint: 'record on your pads · edit the notes' },
 ];
 
 // A reload would throw away unsaved studio work.
@@ -35,8 +34,8 @@ window.addEventListener('beforeunload', (e) => {
 
 /**
  * STUDIO: the song editor. Create a song from an audio file or open one from the library, then work on
- * it in three tabs — SONG (details, tempo/offset, custom samples), RECORD (capture a take on the pads
- * and quantize it into a chart) and CHART (piano-roll note editor). Everything edits one in-memory
+ * it in two tabs — SONG (details, tempo/offset, the two mixes, custom samples) and CHART (piano-roll
+ * note editor that also records pad hits straight onto the chart). Everything edits one in-memory
  * working copy; SAVE writes it to the library, SAVE AS saves a copy under a new title.
  */
 export function studioScreen(app: App, params?: Record<string, unknown>): Screen {
@@ -44,29 +43,15 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
   const body = h('div', { class: 'studio-wrap' });
   const actions = h('div', { class: 'row', style: { gap: '8px' } });
   let transport: Transport | null = null;
-  let player: ChartPlayer | null = null;
   let metro: Metronome | null = null;
   let picker: OffsetPicker | null = null;
   let editor: ChartEditor | null = null;
   let editorToken = 0;
-  let quant: QuantizeOptions = { grid: '1/16', strength: 1, swing: 0, dedupeWindow: 0.03 };
-  let quantized: Chart | null = null;
-  let deriveEasier = true;
-  /** RECORD tab: show the recording setup even though a take is pending. */
-  let recordSetup = false;
-
-  studioState.chartForRecording = (pkg) => baseChart(pkg);
-
-  function baseChart(pkg: SongPackage): Chart {
-    return { ppq: DEFAULT_PPQ, tempoMap: constantTempoMap(pkg.meta.bpm), timeSignatures: [{ tick: 0, numerator: 4, denominator: 4 }], notes: [], duration: studioState.audioBuffer ? studioState.audioBuffer.duration - pkg.meta.offset : 0 };
-  }
 
   function stopPreview(): void {
     picker?.stop();
-    player?.stop();
     metro?.stop();
     transport?.stop();
-    player = null;
     metro = null;
     transport = null;
   }
@@ -86,15 +71,6 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     renderActions();
   }
 
-  /** Put `chart` into the working copy as `<difficulty>.mid`. A chart with no notes removes the difficulty instead. */
-  function setChart(d: Difficulty, chart: Chart, auto = false): void {
-    const pkg = studioState.pkg!;
-    if (!chart.notes.length) return removeChart(d);
-    pkg.files.set(`${d}.mid`, midiBlob(chart, `${pkg.meta.title} — ${d}${auto ? ' (auto)' : ''}`));
-    pkg.meta.charts[d] = `${d}.mid`;
-    markDirty();
-  }
-
   /** Drop the chart file for `d` from the working copy (it becomes auto-derived again). */
   function removeChart(d: Difficulty): void {
     const pkg = studioState.pkg!;
@@ -106,12 +82,13 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
   }
 
   // ─── open / new ───
-  async function openPackage(pkg: SongPackage, buf: AudioBuffer, savedId: string | null): Promise<void> {
+  async function openPackage(pkg: SongPackage, buf: AudioBuffer, drums: AudioBuffer | null, savedId: string | null): Promise<void> {
     stopPreview();
     closeEditor();
     studioState.reset();
     studioState.pkg = pkg;
     studioState.audioBuffer = buf;
+    studioState.drumsBuffer = drums;
     studioState.savedId = savedId;
     studioState.dirty = savedId === null;
     studioState.targetDifficulty = 'expert';
@@ -134,7 +111,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       const ext = (file.name.split('.').pop() ?? 'mp3').toLowerCase();
       const pkg = createSongPackage({ meta: { title: name, artist: 'Unknown Artist', bpm: 120, offset: 0, length: buf.duration, charter: app.settings.playerName }, audio: file, audioFileName: `audio.${ext}` });
       toast(`Loaded ${file.name} (${fmtTime(buf.duration)}) — set the tempo and offset, then record or draw a chart`, 'ok', 4000);
-      await openPackage(pkg, buf, null);
+      await openPackage(pkg, buf, null, null);
     } catch (err) {
       toast(`Could not decode audio: ${(err as Error).message}`, 'bad');
     }
@@ -148,18 +125,29 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       if (!audioBlob) return toast('Song has no audio', 'bad');
       const buf = await app.engine.decode(await audioBlob.arrayBuffer());
       const pkg: SongPackage = { ...loaded, files: new Map(loaded.files), meta: { ...loaded.meta, charts: { ...loaded.meta.charts }, samples: loaded.meta.samples ? { ...loaded.meta.samples } : undefined } };
-      await openPackage(pkg, buf, e.meta.id);
+      let drums: AudioBuffer | null = null;
+      const drumsBlob = pkg.meta.audioWithDrums ? pkg.files.get(pkg.meta.audioWithDrums) : undefined;
+      if (drumsBlob) {
+        try {
+          drums = await app.engine.decode(await drumsBlob.arrayBuffer());
+        } catch (err) {
+          toast(`Could not decode the mix with drums (${(err as Error).message}) — carrying on without it`, 'bad', 4000);
+        }
+      } else if (pkg.meta.audioWithDrums) {
+        delete pkg.meta.audioWithDrums;
+      }
+      await openPackage(pkg, buf, drums, e.meta.id);
     } catch (err) {
       toast(`Could not open song: ${(err as Error).message}`, 'bad');
     }
   }
 
   /**
-   * Swap the song's audio for another file, keeping the charts, offset and everything else. For working
-   * against a mix WITH drums while programming and shipping the drum-less mix at the end — the two files
-   * must start at the same instant for the offset to carry over.
+   * Pick a file for one of the song's two mixes. 'audio' is the drum-less mix the game plays: swapping it
+   * keeps the charts, offset and everything else. 'drums' is the optional mix WITH drums that the chart
+   * editor can switch to as a reference. The two files must start at the same instant.
    */
-  async function replaceAudio(): Promise<void> {
+  async function pickAudio(kind: 'audio' | 'drums'): Promise<void> {
     const pkg = studioState.pkg;
     if (!pkg) return;
     const [file] = await pickFile('audio/*,.mp3,.wav,.flac,.aac,.m4a,.ogg');
@@ -175,18 +163,42 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     }
     stopPreview();
     closeEditor();
-    const old = studioState.audioBuffer!;
-    pkg.files.delete(pkg.meta.audio);
-    pkg.meta.audio = `audio.${ext}`;
-    pkg.files.set(pkg.meta.audio, file);
-    pkg.meta.length = buf.duration;
-    studioState.audioBuffer = buf;
+    if (kind === 'audio') {
+      const old = studioState.audioBuffer!;
+      pkg.files.delete(pkg.meta.audio);
+      pkg.meta.audio = `audio.${ext}`;
+      pkg.files.set(pkg.meta.audio, file);
+      pkg.meta.length = buf.duration;
+      studioState.audioBuffer = buf;
+      const diff = buf.duration - old.duration;
+      const note = Math.abs(diff) > 0.05
+        ? `${Math.abs(diff).toFixed(2)}s ${diff > 0 ? 'longer' : 'shorter'} than the old one — check the offset still lines up`
+        : 'same length as before; charts and offset carried over';
+      toast(`Audio replaced with ${file.name} (${fmtTime(buf.duration)}) — ${note}`, 'ok', 5000);
+    } else {
+      if (pkg.meta.audioWithDrums) pkg.files.delete(pkg.meta.audioWithDrums);
+      pkg.meta.audioWithDrums = `${DRUMS_AUDIO_BASENAME}.${ext}`;
+      pkg.files.set(pkg.meta.audioWithDrums, file);
+      studioState.drumsBuffer = buf;
+      const diff = buf.duration - studioState.audioBuffer!.duration;
+      const note = Math.abs(diff) > 0.05
+        ? `${Math.abs(diff).toFixed(2)}s ${diff > 0 ? 'longer' : 'shorter'} than the drum-less mix — make sure both start at the same instant`
+        : 'same length as the drum-less mix';
+      toast(`Mix with drums set to ${file.name} (${fmtTime(buf.duration)}) — ${note}`, 'ok', 5000);
+    }
     markDirty();
-    const diff = buf.duration - old.duration;
-    const note = Math.abs(diff) > 0.05
-      ? `${Math.abs(diff).toFixed(2)}s ${diff > 0 ? 'longer' : 'shorter'} than the old one — check the offset still lines up`
-      : 'same length as before; charts and offset carried over';
-    toast(`Audio replaced with ${file.name} (${fmtTime(buf.duration)}) — ${note}`, 'ok', 5000);
+    render();
+  }
+
+  function removeDrumsAudio(): void {
+    const pkg = studioState.pkg;
+    if (!pkg?.meta.audioWithDrums) return;
+    stopPreview();
+    closeEditor();
+    pkg.files.delete(pkg.meta.audioWithDrums);
+    delete pkg.meta.audioWithDrums;
+    studioState.drumsBuffer = null;
+    markDirty();
     render();
   }
 
@@ -303,12 +315,11 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     body.classList.toggle('full', tab === 'chart');
     body.appendChild(
       h('div', { class: 'tabs' }, ...TABS.map((t) => h('div', { class: `tab ${t.id === tab ? 'active' : ''}`, onClick: () => { if (t.id !== tab) go(t.id); } },
-        h('span', { class: 'label' }, t.label, t.id === 'record' && studioState.recorded.length ? h('span', { class: 'dot' }) : null),
+        h('span', { class: 'label' }, t.label),
         h('span', { class: 'hint' }, t.hint)))),
     );
     switch (tab) {
       case 'song': return renderSong();
-      case 'record': return renderRecord();
       case 'chart': return renderChart();
     }
   }
@@ -334,12 +345,12 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       h('div', { class: 'studio-open' },
         h('div', { class: 'panel' },
           h('h2', { class: 'display' }, 'NEW SONG'),
-          h('div', { class: 'dim' }, 'Start from an audio file: a full mix WITHOUT drums (mp3, wav, flac, aac, m4a, ogg). Set the tempo and offset, then record the drum part on your pads or draw it in the chart editor. The game plays your drum samples on top.'),
+          h('div', { class: 'dim' }, 'Start from an audio file: a full mix WITHOUT drums (mp3, wav, flac, aac, m4a, ogg). Set the tempo and offset, then record the drum part on your pads or draw it in the chart editor. The game plays your drum samples on top. A second mix WITH drums can be added on the SONG tab as a reference for the editor.'),
           h('div', { class: 'btn-row', style: { marginTop: '16px' } }, button('CHOOSE AUDIO FILE', () => void newFromAudio(), 'primary big')),
         ),
         h('div', { class: 'panel' },
           h('h2', { class: 'display' }, 'OPEN A SONG'),
-          h('div', { class: 'dim', style: { marginBottom: '12px' } }, 'Change its details, record a new take, or fix notes in the chart. Saving a bundled song keeps your edited version in the library; remove it from the song list to get the original back.'),
+          h('div', { class: 'dim', style: { marginBottom: '12px' } }, 'Change its details, record onto the chart, or fix notes by hand. Saving a bundled song keeps your edited version in the library; remove it from the song list to get the original back.'),
           list,
         ),
       ),
@@ -439,19 +450,34 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         h('div', { class: 'panel' },
           h('h3', { style: { marginTop: 0 } }, 'Charts'),
           h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '6px' } }, ...chartPills),
-          h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart when the song is played. Difficulties above the hardest chart are not offered to players. A chart with no notes counts as no chart. Record a take or edit the chart to make one real.'),
+          h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart when the song is played. Difficulties above the hardest chart are not offered to players. A chart with no notes counts as no chart. Record onto a difficulty or edit it on the CHART tab to make it real.'),
           h('h3', null, 'Custom drum samples'),
           h('div', { class: 'small dim' }, 'Optional. Assign a sample (wav/mp3/flac/aac) per drum for this song. Missing drums use the built-in kit.'),
           samplesEditor(),
           h('h3', null, 'Audio'),
-          h('div', { class: 'small mono dim' }, `${meta.audio} · ${fmtTime(buf.duration)} · ${buf.sampleRate} Hz · ${buf.numberOfChannels} ch`),
-          h('div', { class: 'small dim', style: { margin: '6px 0 8px' } }, 'Swap the mix without touching the charts or the offset — e.g. program against a mix WITH drums, then replace it with the drum-less mix for the final version. The two files need to start at the same instant.'),
-          h('div', { class: 'btn-row' }, button('REPLACE AUDIO…', () => void replaceAudio())),
+          audioSlot('Mix without drums', 'What the game plays. Swapping it keeps the charts and the offset.', meta.audio, buf,
+            button('REPLACE…', () => void pickAudio('audio'), 'small')),
+          audioSlot('Mix with drums', 'Optional. The chart editor can switch to it while you program or record.', meta.audioWithDrums, studioState.drumsBuffer,
+            button(meta.audioWithDrums ? 'REPLACE…' : 'ADD…', () => void pickAudio('drums'), 'small'),
+            meta.audioWithDrums ? button('REMOVE', removeDrumsAudio, 'ghost small') : null),
+          h('div', { class: 'small dim', style: { margin: '6px 0 8px' } }, 'Both mixes need to start at the same instant so the offset and charts line up on either one.'),
           h('h3', null, 'Share'),
           h('div', { class: 'small dim', style: { marginBottom: '8px' } }, 'The song folder holds song.json, the audio, one MIDI per difficulty (GM drum notes, channel 10) and any custom samples. Zip it to share it.'),
           h('div', { class: 'btn-row' }, button('DOWNLOAD SONG ZIP', async () => { editor?.flush(); downloadBlob(await exportSongZip(pkg), `${pkg.meta.id}.zip`); })),
         ),
       ),
+    );
+  }
+
+  /** One of the song's audio files: label, decoded stats (or "none") and its buttons. */
+  function audioSlot(label: string, hint: string, path: string | undefined, buf: AudioBuffer | null, ...buttons: (HTMLElement | null)[]): HTMLElement {
+    return h('div', { class: 'audio-slot' },
+      h('div', { class: 'who' },
+        h('div', { class: 'name' }, label),
+        h('div', { class: 'small mono dim' }, path && buf ? `${path} · ${fmtTime(buf.duration)} · ${buf.sampleRate} Hz · ${buf.numberOfChannels} ch` : 'none'),
+        h('div', { class: 'small mute' }, hint),
+      ),
+      h('div', { class: 'btn-row' }, ...buttons),
     );
   }
 
@@ -496,180 +522,6 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     return list;
   }
 
-  // ─── RECORD ───
-  function renderRecord(): void {
-    if (studioState.recorded.length && !recordSetup) renderTake();
-    else renderRecordSetup();
-  }
-
-  function renderRecordSetup(): void {
-    const pkg = studioState.pkg!;
-    const d = studioState.targetDifficulty;
-    body.append(
-      h('div', { class: 'panel', style: { maxWidth: '760px', margin: '0 auto' } },
-        h('h2', { class: 'display' }, 'RECORD A TAKE'),
-        h('div', { class: 'hint-box' }, `You'll get a ${studioState.countInBars}-bar count-in${studioState.metronome ? ' with a metronome' : ''}, then the song plays. Every pad hit is captured with its velocity. Your hits appear on the highway and recede into the distance as you carve the chart. Press ESC to abort.`),
-        h('div', { style: { marginTop: '16px' } }, h('span', { class: 'pill' }, `${pkg.meta.bpm} BPM`), ' ', h('span', { class: 'pill' }, `offset ${pkg.meta.offset}s`), ' ', h('span', { class: 'pill' }, app.input.deviceConfig ? app.input.deviceConfig.deviceName : 'keyboard only')),
-        studioState.recorded.length ? h('div', { style: { marginTop: '12px' } }, h('span', { class: 'pill ok' }, `pending take: ${studioState.recorded.length} hits`), ' ', button('BACK TO THE TAKE →', () => { recordSetup = false; render(); }, 'small')) : null,
-        h('h3', null, 'Which difficulty is this take for?'),
-        h('div', { class: 'diffs', style: { maxWidth: '520px' } }, ...DIFFICULTIES.map((x) => h('div', { class: `diff ${x === d ? 'selected' : ''}`, dataset: { d: x }, onClick: () => { studioState.targetDifficulty = x; render(); } }, x.toUpperCase(), h('span', { class: 'best' }, pkg.meta.charts?.[x] ? 'has chart · will replace' : 'new')))),
-        h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'Record the hardest part you can play; easier difficulties can be generated from it.'),
-        h('h3', null, 'Count-in'),
-        h('div', { class: 'row' },
-          h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: studioState.metronome, onChange: (e: Event) => { studioState.metronome = (e.target as HTMLInputElement).checked; } }), 'Metronome while recording'),
-          h('div', { class: 'field', style: { marginBottom: 0 } }, h('label', null, 'Count-in bars'), select([1, 2, 4].map((n) => ({ value: String(n), label: `${n}` })), String(studioState.countInBars), (v) => { studioState.countInBars = Number(v); })),
-        ),
-        h('div', { class: 'btn-row', style: { marginTop: '24px' } },
-          button(`● START RECORDING · ${d.toUpperCase()}`, async () => { stopPreview(); await app.boot(); app.navigate('game', { pkg, difficulty: d, mode: 'record' }); }, 'primary big'),
-        ),
-      ),
-    );
-  }
-
-  function renderTake(): void {
-    const pkg = studioState.pkg!;
-    const tempoMap = constantTempoMap(pkg.meta.bpm);
-    const statsEl = h('div');
-    const canvas = h('canvas');
-    const timeline = h('div', { class: 'timeline' }, canvas);
-    const applyQuant = () => {
-      const notes = quantizePerformance(studioState.recorded, tempoMap, DEFAULT_PPQ, quant);
-      quantized = performanceToChart(notes, tempoMap, DEFAULT_PPQ);
-      quantized.duration = Math.max(quantized.duration, studioState.audioBuffer!.duration - pkg.meta.offset);
-      studioState.chart = quantized;
-      const st = chartStats(quantized);
-      clear(statsEl);
-      statsEl.append(
-        h('div', { class: 'grid-3' },
-          h('div', { class: 'stat' }, h('div', { class: 'v' }, String(st.notes)), h('div', { class: 'k' }, 'notes')),
-          h('div', { class: 'stat' }, h('div', { class: 'v' }, st.notesPerSecond.toFixed(1)), h('div', { class: 'k' }, 'notes / sec')),
-          h('div', { class: 'stat' }, h('div', { class: 'v' }, `${difficultyRating(quantized)}/10`), h('div', { class: 'k' }, 'difficulty')),
-        ),
-        h('div', { class: 'small mono dim', style: { marginTop: '8px' } }, DRUM_VOICES.map((v) => `${VOICE_LABELS[v]}: ${st.perVoice[v] ?? 0}`).join(' · ')),
-      );
-      drawTimeline();
-      if (player) player.setNotes(quantized.notes);
-    };
-    const drawTimeline = () => {
-      const ctx = canvas.getContext('2d')!;
-      const w = (canvas.width = timeline.clientWidth * devicePixelRatio);
-      const hh = (canvas.height = timeline.clientHeight * devicePixelRatio);
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, w, hh);
-      const dur = Math.max(1, studioState.audioBuffer!.duration);
-      const lanes = DRUM_VOICES;
-      const beat = 60 / pkg.meta.bpm;
-      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-      for (let b = 0; b * beat < dur; b++) {
-        const x = ((b * beat + pkg.meta.offset) / dur) * w;
-        ctx.lineWidth = b % 4 === 0 ? 2 : 1;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, hh);
-        ctx.stroke();
-      }
-      const draw = (notes: { time: number; voice: DrumVoice; velocity: number }[], alpha: number) => {
-        for (const n of notes) {
-          const x = ((n.time + pkg.meta.offset) / dur) * w;
-          const y = (lanes.indexOf(n.voice) + 0.5) * (hh / lanes.length);
-          ctx.globalAlpha = alpha;
-          ctx.fillStyle = VOICE_COLORS[n.voice];
-          ctx.fillRect(x - 1, y - 3 - n.velocity * 3, 2 * devicePixelRatio, 6 + n.velocity * 6);
-        }
-        ctx.globalAlpha = 1;
-      };
-      draw(studioState.recorded, 0.25);
-      if (quantized) draw(quantized.notes, 1);
-      if (transport) {
-        const x = (transport.position / dur) * w;
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(x, 0, 2, hh);
-      }
-    };
-    const gridSel = select(QUANTIZE_GRIDS.map((g) => ({ value: g.id, label: g.label })), quant.grid, (v) => { quant = { ...quant, grid: v as QuantizeOptions['grid'] }; applyQuant(); });
-    const strengthV = h('span', { class: 'mono small' }, `${Math.round(quant.strength * 100)}%`);
-    const strength = h('input', { class: 'input', type: 'range', min: 0, max: 1, step: 0.05, value: quant.strength, onInput: (e: Event) => { quant = { ...quant, strength: Number((e.target as HTMLInputElement).value) }; strengthV.textContent = `${Math.round(quant.strength * 100)}%`; applyQuant(); } });
-    const swingV = h('span', { class: 'mono small' }, `${Math.round(quant.swing * 100)}%`);
-    const swing = h('input', { class: 'input', type: 'range', min: 0, max: 1, step: 0.05, value: quant.swing, onInput: (e: Event) => { quant = { ...quant, swing: Number((e.target as HTMLInputElement).value) }; swingV.textContent = `${Math.round(quant.swing * 100)}%`; applyQuant(); } });
-    const dedupe = h('input', { class: 'input', type: 'number', min: 0, max: 200, step: 5, value: Math.round(quant.dedupeWindow * 1000), onChange: (e: Event) => { quant = { ...quant, dedupeWindow: Number((e.target as HTMLInputElement).value) / 1000 }; applyQuant(); } });
-    let raf = 0;
-    const playBtn = button('▶ PREVIEW (song + your drums)', async () => {
-      if (transport) { stopPreview(); cancelAnimationFrame(raf); playBtn.textContent = '▶ PREVIEW (song + your drums)'; return; }
-      await app.boot();
-      await applySongKit(app, pkg);
-      transport = new Transport(app.engine);
-      transport.load(studioState.audioBuffer!);
-      player = new ChartPlayer(app.engine, app.kit, transport);
-      player.setNotes(quantized!.notes);
-      player.setOffset(pkg.meta.offset);
-      transport.play(0);
-      player.start();
-      playBtn.textContent = '■ STOP';
-      transport.onEnded = () => { stopPreview(); playBtn.textContent = '▶ PREVIEW (song + your drums)'; };
-      const tick = () => { drawTimeline(); if (transport) raf = requestAnimationFrame(tick); };
-      tick();
-    });
-    new ResizeObserver(() => drawTimeline()).observe(timeline);
-    timeline.addEventListener('click', (e) => {
-      if (!transport) return;
-      const r = timeline.getBoundingClientRect();
-      const frac = (e.clientX - r.left) / r.width;
-      transport.seek(frac * studioState.audioBuffer!.duration);
-      player?.resync();
-    });
-    const diffSel = select(DIFFICULTIES.map((d) => ({ value: d, label: `${d.toUpperCase()}${pkg.meta.charts?.[d] ? ' (replaces chart)' : ''}` })), studioState.targetDifficulty, (v) => { studioState.targetDifficulty = v as Difficulty; useBtn.textContent = useLabel(); });
-    const useLabel = () => `USE TAKE AS ${studioState.targetDifficulty.toUpperCase()} CHART →`;
-    const useBtn = button(useLabel(), () => {
-      const chart = quantized;
-      if (!chart) return;
-      const d = studioState.targetDifficulty;
-      stopPreview();
-      cancelAnimationFrame(raf);
-      setChart(d, chart);
-      const made: string[] = [d];
-      if (deriveEasier) {
-        for (const x of DIFFICULTIES) {
-          if (x === d || pkg.meta.charts[x] || DIFFICULTIES.indexOf(x) > DIFFICULTIES.indexOf(d)) continue;
-          setChart(x, deriveDifficulty(chart, x), true);
-          made.push(x);
-        }
-      }
-      studioState.recorded = [];
-      studioState.chart = null;
-      quantized = null;
-      toast(`Take written to the ${made.join(', ')} chart${made.length > 1 ? 's' : ''} — fine-tune it here, then SAVE`, 'ok', 4000);
-      go('chart');
-    }, 'primary big');
-    body.append(
-      h('div', { class: 'studio' },
-        h('div', { class: 'panel' },
-          h('h2', { class: 'display' }, 'QUANTIZE THE TAKE'),
-          h('div', { class: 'dim' }, `${studioState.recorded.length} raw hits captured. Snap them to the grid, preview, then use the take as a chart.`),
-          h('div', { style: { marginTop: '14px' } }, timeline),
-          h('div', { class: 'small mute', style: { marginTop: '4px' } }, 'Dim = raw hits · bright = quantized · click to seek while previewing'),
-          h('div', { class: 'btn-row', style: { marginTop: '14px' } }, playBtn),
-          h('div', { style: { marginTop: '16px' } }, statsEl),
-          h('div', { class: 'btn-row', style: { marginTop: '24px' } },
-            useBtn,
-            button('RECORD ANOTHER TAKE', () => { stopPreview(); cancelAnimationFrame(raf); recordSetup = true; render(); }, 'ghost'),
-            button('DISCARD TAKE', () => { if (!confirm('Throw away this take?')) return; stopPreview(); cancelAnimationFrame(raf); studioState.recorded = []; studioState.chart = null; quantized = null; render(); }, 'ghost'),
-          ),
-        ),
-        h('div', { class: 'panel' },
-          h('h3', { style: { marginTop: 0 } }, 'Quantize'),
-          field('Grid', gridSel),
-          field('Strength', h('div', { class: 'row' }, strength, strengthV), '100% snaps fully; lower keeps some of your feel.'),
-          field('Swing', h('div', { class: 'row' }, swing, swingV), 'Delays off-beats (1/8, 1/16, 1/32 grids).'),
-          field('Merge double-hits within (ms)', dedupe, 'Collapses accidental double triggers on the same drum.'),
-          h('h3', null, 'Use as'),
-          field('Difficulty', diffSel),
-          h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: deriveEasier, onChange: (e: Event) => { deriveEasier = (e.target as HTMLInputElement).checked; } }), 'Also generate the easier difficulties that have no chart yet'),
-        ),
-      ),
-    );
-    applyQuant();
-  }
-
   // ─── CHART ───
   function renderChart(): void {
     const pkg = studioState.pkg!;
@@ -679,6 +531,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     chartEditor(app, {
       pkg,
       audio: studioState.audioBuffer!,
+      drumsAudio: studioState.drumsBuffer ?? undefined,
       difficulty: studioState.targetDifficulty,
       onChange: markDirty,
       onDifficulty: (d) => { studioState.targetDifficulty = d; },

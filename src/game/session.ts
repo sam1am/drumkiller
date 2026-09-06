@@ -1,25 +1,21 @@
-import type { Chart, Difficulty, DrumVoice, InputHit, Lane, PerformanceNote, ScoreSummary, SongMeta } from '@/types';
-import { Transport, ChartPlayer, Metronome } from '@/audio';
+import type { Chart, Difficulty, DrumVoice, InputHit, Lane, ScoreSummary, SongMeta } from '@/types';
+import { Transport, ChartPlayer } from '@/audio';
 import type { AudioEngine, DrumKit } from '@/audio';
 import { ticksToSeconds } from '@/midi';
 import { Judge, type JudgeEvent } from './scoring';
 import { HighwayRenderer, type BeatMark, type RenderState } from './renderer';
 
-export type GameMode = 'play' | 'practice' | 'record';
+export type GameMode = 'play' | 'practice';
 
 export interface SessionConfig {
   mode: GameMode;
   meta: SongMeta;
-  chart: Chart; // for record mode: may be empty (notes: []), used for beats/tempo
+  chart: Chart;
   difficulty: Difficulty;
   audio: AudioBuffer;
   rate?: number;
   /** Practice: play the chart's drums as a guide. */
   guideDrums?: boolean;
-  /** Record: metronome on. */
-  metronome?: boolean;
-  /** Record: count-in bars. */
-  countInBars?: number;
   inputOffset: number;
   hitWindowScale: number;
   strictVoices: boolean;
@@ -34,7 +30,7 @@ export interface SessionConfig {
 export interface SessionCallbacks {
   onJudge?: (ev: JudgeEvent) => void;
   onStreak?: (combo: number) => void;
-  onFinish?: (summary: ScoreSummary, recorded: PerformanceNote[]) => void;
+  onFinish?: (summary: ScoreSummary) => void;
   onTick?: (position: number, duration: number) => void;
   onCountdown?: (n: number | null) => void;
   /** After each highway frame is drawn (used by the video recorder to composite). */
@@ -42,16 +38,14 @@ export interface SessionCallbacks {
 }
 
 /**
- * A single play/practice/record session: ties Transport, Judge, Renderer, DrumKit, and input together.
+ * A single play/practice session: ties Transport, Judge, Renderer, DrumKit, and input together.
  */
 export class GameSession {
   readonly transport: Transport;
   readonly judge: Judge;
   readonly renderer: HighwayRenderer;
   readonly beats: BeatMark[];
-  readonly recorded: PerformanceNote[] = [];
   private guide: ChartPlayer | null = null;
-  private metro: Metronome | null = null;
   private raf = 0;
   private running = false;
   private finished = false;
@@ -74,10 +68,10 @@ export class GameSession {
     this.transport = new Transport(engine);
     this.transport.load(cfg.audio);
     this.transport.setRate(cfg.rate ?? 1);
-    this.judge = new Judge(cfg.mode === 'record' ? [] : cfg.chart.notes, {
+    this.judge = new Judge(cfg.chart.notes, {
       difficulty: cfg.difficulty,
       strictVoices: cfg.strictVoices && (cfg.difficulty === 'hard' || cfg.difficulty === 'expert'),
-      overhitBreaksCombo: cfg.mode !== 'record',
+      overhitBreaksCombo: true,
       windowScale: cfg.hitWindowScale,
     });
     this.renderer = new HighwayRenderer(canvas);
@@ -100,11 +94,6 @@ export class GameSession {
       this.guide = new ChartPlayer(engine, kit, this.transport);
       this.guide.setNotes(cfg.chart.notes);
       this.guide.setOffset(cfg.meta.offset);
-    }
-    if (cfg.mode === 'record' && cfg.metronome) {
-      this.metro = new Metronome(engine, this.transport);
-      this.metro.setTempoMap(cfg.chart.tempoMap, cfg.chart.ppq, cfg.chart.timeSignatures);
-      this.metro.setOffset(cfg.meta.offset);
     }
     // Compensate for audio output latency: what the player hears is later than the audio clock.
     this.latencyComp = engine.inputLatencyCompensation;
@@ -135,14 +124,12 @@ export class GameSession {
 
   /** Start with a count-in (seconds of pre-roll before audio time 0). */
   async start(countInSeconds = 3): Promise<void> {
-    await this.metro?.prepare();
     this.running = true;
     this.paused = false;
     this.unsubInput = this.inputSource.onHit((hit) => this.handleHit(hit));
     const from = this.cfg.loop ? this.cfg.loop.start + this.cfg.meta.offset - 1.5 : -countInSeconds;
     this.transport.play(from);
     this.guide?.start();
-    this.metro?.start();
     this.transport.onEnded = () => this.onAudioEnded();
     this.runCountdown(countInSeconds);
     this.loop();
@@ -167,7 +154,6 @@ export class GameSession {
     this.paused = true;
     this.transport.pause();
     this.guide?.stop();
-    this.metro?.stop();
     clearInterval(this.countdownTimer);
     this.cb.onCountdown?.(null);
   }
@@ -180,7 +166,6 @@ export class GameSession {
     this.judge.reseek(pos - this.cfg.meta.offset);
     this.transport.play(pos);
     this.guide?.start();
-    this.metro?.start();
     this.runCountdown(1.5);
   }
 
@@ -199,7 +184,6 @@ export class GameSession {
     this.judge.reseek(chartTime);
     this.transport.seek(pos);
     this.guide?.resync();
-    this.metro?.resync();
   }
 
   stop(): void {
@@ -208,7 +192,6 @@ export class GameSession {
     clearInterval(this.countdownTimer);
     this.transport.stop();
     this.guide?.stop();
-    this.metro?.stop();
     this.unsubInput?.();
     window.removeEventListener('resize', this.resizeHandler);
     if (this.analyser) {
@@ -228,11 +211,6 @@ export class GameSession {
     const pos = this.transport.positionAtPerfTime(hit.timeStamp);
     const t = this.judgeTime(pos - this.cfg.meta.offset);
     this.renderer.drumPulse(hit.voice, hit.velocity);
-    if (this.cfg.mode === 'record') {
-      if (t >= -0.5) this.recorded.push({ time: t, voice: hit.voice, velocity: hit.velocity });
-      this.renderer.hitFlash(hit.voice, 'perfect');
-      return;
-    }
     if (t < -0.5) return;
     this.judge.hit(hit.voice, t);
   }
@@ -276,7 +254,7 @@ export class GameSession {
     }
     this.render(t);
     this.cb.onTick?.(this.transport.position, this.audioDuration);
-    if (!this.finished && !this.paused && this.cfg.mode !== 'record' && this.judge.finished && t > this.cfg.chart.duration && this.cfg.mode === 'play') {
+    if (!this.finished && !this.paused && this.judge.finished && t > this.cfg.chart.duration && this.cfg.mode === 'play') {
       // Chart done: end a little early rather than waiting for a long outro.
       if (t > this.duration - 0.5 || t > this.cfg.chart.duration + 4) this.finish();
     }
@@ -291,7 +269,6 @@ export class GameSession {
       combo: this.judge.combo,
       multiplier: this.judge.multiplier,
       mode: this.cfg.mode,
-      recorded: this.recorded,
       paused: this.paused,
       accent: this.cfg.meta.accent,
     };
@@ -299,7 +276,7 @@ export class GameSession {
     this.cb.onFrame?.();
   }
 
-  /** End the session now with whatever has been played/recorded (used by 'finish take'). */
+  /** End the session now with whatever has been played (debugging / the e2e test). */
   finishNow(): void {
     this.finish();
   }
@@ -313,9 +290,8 @@ export class GameSession {
     if (this.finished) return;
     this.finished = true;
     const summary = this.judge.summary();
-    const rec = this.recorded.slice().sort((a, b) => a.time - b.time);
     this.stop();
-    this.cb.onFinish?.(summary, rec);
+    this.cb.onFinish?.(summary);
   }
 }
 
