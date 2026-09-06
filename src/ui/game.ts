@@ -1,29 +1,43 @@
 import type { App, Screen } from '@/app';
 import type { Chart, Difficulty, PerformanceNote, ScoreSummary, SongPackage } from '@/types';
-import { DRUM_VOICES, LANE_FOR_VOICE } from '@/types';
+import { DIFFICULTIES, DRUM_VOICES, LANE_FOR_VOICE } from '@/types';
 import { WaveformStrip } from '@/game/waveform';
 import { VOICE_COLORS } from '@/game/renderer';
 import { chartFromMidi, deriveDifficulty, parseMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
-import { getChartBlob, hardestAvailable } from '@/song';
+import { getChartBlob } from '@/song';
 import { GameSession, type GameMode } from '@/game/session';
 import { CAM_ASPECT, VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot } from '@/game/videoRecorder';
 import { starString } from '@/game/scoring';
 import { h, button, toast, fmtScore, clear } from './dom';
 import { studioState } from './studioState';
 
-/** Load (or derive) the chart for a difficulty from a song package. */
-export async function loadChart(pkg: SongPackage, difficulty: Difficulty): Promise<{ chart: Chart; derived: boolean }> {
-  const explicit = getChartBlob(pkg, difficulty);
-  if (explicit) {
-    const midi = parseMidi(await explicit.arrayBuffer());
-    return { chart: chartFromMidi(midi, { fallbackBpm: pkg.meta.bpm }), derived: false };
+/** Parse the chart file listed for `difficulty`, or null when the package has none. */
+export async function readChart(pkg: SongPackage, difficulty: Difficulty): Promise<Chart | null> {
+  const blob = getChartBlob(pkg, difficulty);
+  if (!blob) return null;
+  return chartFromMidi(parseMidi(await blob.arrayBuffer()), { fallbackBpm: pkg.meta.bpm });
+}
+
+/** Difficulties whose chart file exists AND contains notes, easy→expert. An empty MIDI counts as no chart. */
+export async function realDifficulties(pkg: SongPackage): Promise<Difficulty[]> {
+  const out: Difficulty[] = [];
+  for (const d of DIFFICULTIES) {
+    const c = await readChart(pkg, d).catch(() => null);
+    if (c?.notes.length) out.push(d);
   }
-  const hardest = hardestAvailable(pkg);
+  return out;
+}
+
+/** Load (or derive) the chart for a difficulty from a song package. A chart file with no notes is treated as missing. */
+export async function loadChart(pkg: SongPackage, difficulty: Difficulty): Promise<{ chart: Chart; derived: boolean }> {
+  const explicit = await readChart(pkg, difficulty);
+  if (explicit?.notes.length) return { chart: explicit, derived: false };
+  const real = await realDifficulties(pkg);
+  const hardest = real[real.length - 1];
   if (!hardest) {
     return { chart: { ppq: DEFAULT_PPQ, tempoMap: constantTempoMap(pkg.meta.bpm), timeSignatures: [{ tick: 0, numerator: 4, denominator: 4 }], notes: [], duration: pkg.meta.length ?? 0 }, derived: true };
   }
-  const blob = getChartBlob(pkg, hardest)!;
-  const src = chartFromMidi(parseMidi(await blob.arrayBuffer()), { fallbackBpm: pkg.meta.bpm });
+  const src = (await readChart(pkg, hardest))!;
   return { chart: deriveDifficulty(src, difficulty), derived: true };
 }
 

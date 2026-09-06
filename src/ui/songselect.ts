@@ -1,6 +1,6 @@
 import type { App, Screen } from '@/app';
-import { DIFFICULTIES, type Difficulty, type SongListEntry, type SongPackage } from '@/types';
-import { loadSongFromZip, loadSongFromFiles, availableDifficulties } from '@/song';
+import { type Difficulty, type SongListEntry, type SongPackage } from '@/types';
+import { loadSongFromZip, loadSongFromFiles, availableDifficulties, playableDifficulties } from '@/song';
 import { h, button, toast, pickFile, pickFolder, clear, fmtScore, fmtTime } from './dom';
 import { topbar } from './topbar';
 import { drawProceduralArt } from './artwork';
@@ -107,9 +107,11 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
     const e = selected;
     const best = app.scores.getBestAllDifficulties(e.meta.id);
     const diffs = h('div', { class: 'diffs' });
-    // Availability: charts listed in meta; anything missing is auto-derived.
+    // Availability: up to the hardest chart listed in meta; easier ones are auto-derived, harder ones are not offered.
     const explicit = new Set(Object.keys(e.meta.charts ?? {}));
-    for (const d of DIFFICULTIES) {
+    const playable = playableDifficulties(e.meta);
+    if (playable.length && !playable.includes(difficulty)) difficulty = playable[playable.length - 1];
+    for (const d of playable) {
       const b = best[d];
       const btn = h(
         'div',
@@ -131,12 +133,12 @@ export function songSelectScreen(app: App, params?: Record<string, unknown>): Sc
       h('div', { class: 'dim' }, `${e.meta.artist}${e.meta.album ? ' · ' + e.meta.album : ''}${e.meta.year ? ' · ' + e.meta.year : ''}`),
       h('div', { class: 'row', style: { marginTop: '10px' } }, h('span', { class: 'pill' }, `${Math.round(e.meta.bpm)} BPM`), e.meta.length ? h('span', { class: 'pill' }, fmtTime(e.meta.length)) : null, e.meta.charter ? h('span', { class: 'pill' }, `chart: ${e.meta.charter}`) : null, e.meta.samples && Object.keys(e.meta.samples).length ? h('span', { class: 'pill accent' }, 'custom kit') : null),
       h('h3', null, 'Difficulty'),
-      diffs,
-      h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart in the song folder.'),
+      playable.length ? diffs : h('div', { class: 'hint-box' }, 'This song has no chart yet. Open it in the Studio to record or draw one.'),
+      ...(playable.length ? [h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart in the song folder.')] : []),
       h('h3', null, practice ? 'Practice' : 'Leaderboard'),
       practice ? h('div', { class: 'hint-box' }, 'Practice mode: adjust speed, loop sections, hear guide drums. Scores are not saved.') : lb,
       h('div', { class: 'btn-row', style: { marginTop: '20px' } },
-        button(practice ? 'PRACTICE' : 'PLAY', () => play(e), 'primary big'),
+        Object.assign(button(practice ? 'PRACTICE' : 'PLAY', () => play(e), 'primary big'), { disabled: !playable.length }),
         e.source !== 'bundled' ? button('REMOVE', () => remove(e), 'danger') : null,
       ),
     );

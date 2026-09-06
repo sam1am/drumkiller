@@ -1,13 +1,13 @@
 import type { App, Screen } from '@/app';
 import { DIFFICULTIES, DRUM_VOICES, VOICE_LABELS, type Chart, type Difficulty, type DrumVoice, type QuantizeOptions, type SongListEntry, type SongPackage } from '@/types';
 import { chartToMidi, writeMidi, performanceToChart, quantizePerformance, QUANTIZE_GRIDS, constantTempoMap, DEFAULT_PPQ, chartStats, difficultyRating, deriveDifficulty } from '@/midi';
-import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS, AUDIO_EXTENSIONS } from '@/song';
+import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS, AUDIO_EXTENSIONS, playableDifficulties } from '@/song';
 import { Transport, ChartPlayer, Metronome } from '@/audio';
 import { h, button, field, toast, clear, downloadBlob, pickFile, select, fmtTime, modal } from './dom';
 import { topbar } from './topbar';
 import { studioState, type StudioTab } from './studioState';
 import { VOICE_COLORS } from '@/game/renderer';
-import { applySongKit } from './game';
+import { applySongKit, realDifficulties } from './game';
 import { offsetPicker, type OffsetPicker } from './offsetPicker';
 import { chartEditor, type ChartEditor } from './chartEditor';
 
@@ -86,11 +86,22 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     renderActions();
   }
 
-  /** Put `chart` into the working copy as `<difficulty>.mid`. */
+  /** Put `chart` into the working copy as `<difficulty>.mid`. A chart with no notes removes the difficulty instead. */
   function setChart(d: Difficulty, chart: Chart, auto = false): void {
     const pkg = studioState.pkg!;
+    if (!chart.notes.length) return removeChart(d);
     pkg.files.set(`${d}.mid`, midiBlob(chart, `${pkg.meta.title} — ${d}${auto ? ' (auto)' : ''}`));
     pkg.meta.charts[d] = `${d}.mid`;
+    markDirty();
+  }
+
+  /** Drop the chart file for `d` from the working copy (it becomes auto-derived again). */
+  function removeChart(d: Difficulty): void {
+    const pkg = studioState.pkg!;
+    const path = pkg.meta.charts[d];
+    if (!path) return;
+    pkg.files.delete(path);
+    delete pkg.meta.charts[d];
     markDirty();
   }
 
@@ -105,6 +116,11 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     studioState.dirty = savedId === null;
     studioState.targetDifficulty = 'expert';
     applySongKit(app, pkg).catch((err) => console.warn('kit load failed', err));
+    // A chart file with no notes is no chart: drop it so the difficulty reads as AUTO everywhere.
+    const real = new Set(await realDifficulties(pkg));
+    const empty = DIFFICULTIES.filter((d) => pkg.meta.charts[d] && !real.has(d));
+    for (const d of empty) removeChart(d);
+    if (empty.length) toast(`Dropped the empty ${empty.join(', ')} chart${empty.length > 1 ? 's' : ''} — save to clean up the library copy`, 'ok', 4000);
     render();
   }
 
@@ -400,7 +416,8 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         markDirty();
         if (key === 'title') renderActions();
       } });
-    const chartPills = DIFFICULTIES.map((d) => h('span', { class: `pill ${meta.charts[d] ? 'ok' : ''}` }, `${d}: ${meta.charts[d] ? 'chart' : 'auto'}`));
+    const playable = playableDifficulties(meta);
+    const chartPills = DIFFICULTIES.map((d) => h('span', { class: `pill ${meta.charts[d] ? 'ok' : playable.includes(d) ? '' : 'mute'}` }, `${d}: ${meta.charts[d] ? 'chart' : playable.includes(d) ? 'auto' : 'not offered'}`));
     body.append(
       h('div', { class: 'studio' },
         h('div', { class: 'panel' },
@@ -422,7 +439,7 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
         h('div', { class: 'panel' },
           h('h3', { style: { marginTop: 0 } }, 'Charts'),
           h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '6px' } }, ...chartPills),
-          h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart when the song is played. Record a take or edit the chart to make one real.'),
+          h('div', { class: 'small mute', style: { marginTop: '6px' } }, 'AUTO = generated from the hardest chart when the song is played. Difficulties above the hardest chart are not offered to players. A chart with no notes counts as no chart. Record a take or edit the chart to make one real.'),
           h('h3', null, 'Custom drum samples'),
           h('div', { class: 'small dim' }, 'Optional. Assign a sample (wav/mp3/flac/aac) per drum for this song. Missing drums use the built-in kit.'),
           samplesEditor(),

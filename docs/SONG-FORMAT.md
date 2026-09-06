@@ -102,7 +102,7 @@ Chart time zero is the first tick of the MIDI file. Your DAW exports normally st
 
 ### Difficulties
 
-You only need one chart. The game derives the missing difficulties from the **hardest** one you provide: `expert` → `hard` → `medium` → `easy`, progressively thinning ghost notes, hi-hat subdivisions and fills. Ship hand-made charts for whichever difficulties you care about and let the rest be derived; a hand-made chart always wins over a derived one.
+You only need one chart. The game derives the missing difficulties from the **hardest** one you provide: `expert` → `hard` → `medium` → `easy`, progressively thinning ghost notes, hi-hat subdivisions and fills. Ship hand-made charts for whichever difficulties you care about and let the rest be derived; a hand-made chart always wins over a derived one. Difficulties **above** your hardest chart are not offered to players (a song with only `hard.mid` is playable on easy, medium and hard). A MIDI file with no drum notes in it counts as no chart at all.
 
 Recommended naming is `<difficulty>.mid` at the folder root, but any path in `charts` works.
 

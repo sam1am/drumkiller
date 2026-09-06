@@ -9,6 +9,7 @@ import {
   getChartBlob,
   getFile,
   hardestAvailable,
+  playableDifficulties,
   loadSongFromFiles,
   loadSongFromUrl,
   loadSongFromZip,
@@ -156,6 +157,13 @@ describe('createSongPackage + accessors', () => {
     expect(() =>
       createSongPackage({ meta: { title: 't', artist: 'a', bpm: 100 }, audio: blob('x'), audioFileName: 'x.wma' }),
     ).toThrow(/Unsupported audio/);
+  });
+
+  it('playableDifficulties runs up to the hardest chart listed and no further', () => {
+    expect(playableDifficulties({ charts: {} })).toEqual([]);
+    expect(playableDifficulties({ charts: { expert: 'expert.mid' } })).toEqual(['easy', 'medium', 'hard', 'expert']);
+    expect(playableDifficulties({ charts: { medium: 'medium.mid' } })).toEqual(['easy', 'medium']);
+    expect(playableDifficulties({ charts: { easy: 'e.mid', hard: 'h.mid' } })).toEqual(['easy', 'medium', 'hard']);
   });
 
   it('hardestAvailable is null with no charts', () => {

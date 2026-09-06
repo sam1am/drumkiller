@@ -452,6 +452,18 @@ export function hardestAvailable(pkg: SongPackage): Difficulty | null {
   return avail.length ? avail[avail.length - 1] : null;
 }
 
+/**
+ * Difficulties a song can be played on, from its metadata alone: every difficulty up to and
+ * including the hardest chart listed. Easier ones are derived from that chart; harder ones would
+ * only be a copy of it, so they are not offered. Empty when the song lists no charts.
+ */
+export function playableDifficulties(meta: Pick<SongMeta, 'charts'>): Difficulty[] {
+  const listed = DIFFICULTIES.filter((d) => !!meta.charts?.[d]);
+  if (!listed.length) return [];
+  const top = DIFFICULTIES.indexOf(listed[listed.length - 1]);
+  return DIFFICULTIES.slice(0, top + 1);
+}
+
 const artworkUrlCache = new WeakMap<SongPackage, string>();
 
 /** Object URL for the artwork (cached per package). Undefined when there is no artwork. */

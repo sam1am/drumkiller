@@ -131,8 +131,12 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   const env = computeEnvelope(envChannels, audio.sampleRate, 200);
   const chartDuration = audio.duration - pkg.meta.offset;
 
+  /** Bumped on every load so a slower, older load can't overwrite a newer one. */
+  let loadToken = 0;
   async function loadDifficulty(d: Difficulty): Promise<void> {
+    const token = ++loadToken;
     const r = await loadChart(pkg, d);
+    if (token !== loadToken) return;
     base = r.chart;
     derived = r.derived;
     notes = base.notes.map((n) => ({ id: nextId++, time: n.time, voice: n.voice, velocity: n.velocity }));
@@ -822,17 +826,52 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     c.duration = Math.max(c.duration, chartDuration);
     return c;
   }
-  /** Write the edited chart into the package as `<difficulty>.mid` (a derived chart becomes a real one). */
+  /** Take `<difficulty>.mid` out of the package: the difficulty goes back to being auto-derived. */
+  function removeFromPackage(d: Difficulty): void {
+    const path = pkg.meta.charts[d];
+    if (path) pkg.files.delete(path);
+    delete pkg.meta.charts[d];
+  }
+  /**
+   * Write the edited chart into the package as `<difficulty>.mid` (a derived chart becomes a real one).
+   * An edit that leaves no notes removes the chart file instead — an empty chart is no chart.
+   */
   function flush(): boolean {
     if (!dirty) return false;
-    const midi = writeMidi(chartToMidi(toChart(), { trackName: `${pkg.meta.title} — ${difficulty}` }));
-    pkg.files.set(`${difficulty}.mid`, new Blob([midiBytes(midi)], { type: 'audio/midi' }));
-    pkg.meta.charts[difficulty] = `${difficulty}.mid`;
+    if (notes.length) {
+      const midi = writeMidi(chartToMidi(toChart(), { trackName: `${pkg.meta.title} — ${difficulty}` }));
+      pkg.files.set(`${difficulty}.mid`, new Blob([midiBytes(midi)], { type: 'audio/midi' }));
+      pkg.meta.charts[difficulty] = `${difficulty}.mid`;
+      derived = false;
+    } else {
+      // Emptied out: the difficulty is auto-derived again, so show what players will actually get.
+      removeFromPackage(difficulty);
+      derived = true;
+      void loadDifficulty(difficulty).then(draw);
+    }
     dirty = false;
-    derived = false;
     refreshDiffLabels();
     updateStatus();
     return true;
+  }
+  /** Delete this difficulty's chart file (after confirming) and reload it as auto-derived. */
+  async function deleteChart(): Promise<void> {
+    if (!pkg.meta.charts[difficulty]) return;
+    const others = DIFFICULTIES.filter((d) => d !== difficulty && pkg.meta.charts[d]);
+    const hardestOther = others.length ? others[others.length - 1] : null;
+    const then = hardestOther
+      ? DIFFICULTIES.indexOf(hardestOther) >= DIFFICULTIES.indexOf(difficulty)
+        ? `It will be generated from the ${hardestOther} chart instead.`
+        : `It will no longer be offered to players (the hardest remaining chart is ${hardestOther}).`
+      : 'The song will have no chart left.';
+    if (!confirm(`Delete the ${difficulty.toUpperCase()} chart? ${then} This cannot be undone once you save.`)) return;
+    removeFromPackage(difficulty);
+    dirty = false;
+    opts.onChange();
+    await loadDifficulty(difficulty);
+    refreshDiffLabels();
+    draw();
+    toast(`${difficulty.toUpperCase()} chart deleted${hardestOther ? ` — now auto-generated from ${hardestOther}` : ''}`, 'ok');
   }
 
   // ── toolbar ──
@@ -841,9 +880,13 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     playBtn.textContent = transport.playing ? '■ STOP' : '▶ PLAY';
   };
   const status = h('span', { class: 'mono small dim' });
+  const deleteChartBtn = button('DELETE CHART', () => void deleteChart(), 'danger small');
+  deleteChartBtn.title = 'Remove this difficulty\'s chart file from the song (asks first)';
   const updateStatus = () => {
     const st = chartStats(toChart());
     status.textContent = `${difficulty.toUpperCase()} · ${notes.length} notes · ${st.notesPerSecond.toFixed(1)} nps · ${difficultyRating(toChart())}/10${derived ? ' · AUTO-GENERATED (edit to make it a real chart)' : ''}`;
+    deleteChartBtn.hidden = !pkg.meta.charts[difficulty];
+    deleteChartBtn.textContent = `DELETE ${difficulty.toUpperCase()} CHART`;
   };
   let velocityForNew = 0.9;
   const velSlider = h('input', { class: 'input', type: 'range', min: 0.05, max: 1, step: 0.01, value: velocityForNew, style: { width: '110px' }, onInput: (e: Event) => { velocityForNew = Number((e.target as HTMLInputElement).value); setSelectedVelocity(velocityForNew); } });
@@ -886,7 +929,7 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     songBtn,
     mixBtn,
   );
-  const footer = h('div', { class: 'editor-footer' }, status, h('span', { class: 'spacer' }), ...(opts.actions ?? []));
+  const footer = h('div', { class: 'editor-footer' }, status, h('span', { class: 'spacer' }), deleteChartBtn, ...(opts.actions ?? []));
   const help = h('div', { class: 'small mute editor-help' },
     'Click empty space = add note (drops the old selection) · drag a note sideways = move, up/down = velocity · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
     h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing · M / S on a row = mute / solo that drum (alt-click S = solo only it) · SONG = mute the song audio',
@@ -912,7 +955,7 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   };
   tick();
   app.input.keyboard.setEnabled(false); // editor owns the keyboard
-  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; }, get muted() { return muted; }, get soloed() { return soloed; }, get muteVoices() { return player.muteVoices; }, toggleMute, toggleSolo, clearMix, get songAudio() { return songAudio; } };
+  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; }, get muted() { return muted; }, get soloed() { return soloed; }, deleteChart, get derived() { return derived; }, get muteVoices() { return player.muteVoices; }, toggleMute, toggleSolo, clearMix, get songAudio() { return songAudio; } };
 
   return {
     el,
