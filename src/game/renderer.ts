@@ -565,16 +565,30 @@ export class HighwayRenderer {
         break;
       }
       case 'hihatOpen': {
-        // hollow ring with an O
-        ctx.lineWidth = Math.max(2, 5 * scale);
-        ctx.strokeStyle = color;
+        // The closed hat's gem pulled apart: two halves with a bright gap between them — the cymbals
+        // open. Same colour family as the closed hat, but the split reads at a glance and never looks
+        // like a target or a mute icon.
+        const gap = ry * 0.34;
         ctx.beginPath();
-        ctx.ellipse(x, y, rx, ry * 1.1, 0, 0, Math.PI * 2);
+        ctx.moveTo(x, y - ry * 1.3 - gap);
+        ctx.lineTo(x + rx, y - gap);
+        ctx.lineTo(x - rx, y - gap);
+        ctx.closePath();
+        ctx.fill();
         ctx.stroke();
-        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-        ctx.lineWidth = Math.max(1, 1.5 * scale);
         ctx.beginPath();
-        ctx.ellipse(x, y, rx * 0.55, ry * 0.6, 0, 0, Math.PI * 2);
+        ctx.moveTo(x, y + ry * 1.3 + gap);
+        ctx.lineTo(x + rx, y + gap);
+        ctx.lineTo(x - rx, y + gap);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // light spilling out between the two halves
+        ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+        ctx.lineWidth = Math.max(1.5, 3 * scale);
+        ctx.beginPath();
+        ctx.moveTo(x - rx * 0.72, y);
+        ctx.lineTo(x + rx * 0.72, y);
         ctx.stroke();
         break;
       }

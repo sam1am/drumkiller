@@ -3,7 +3,7 @@ import { DIFFICULTIES, DRUM_VOICES, VOICE_LABELS, type Chart, type Difficulty, t
 import { chartToMidi, writeMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
 import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS, AUDIO_EXTENSIONS, DRUMS_AUDIO_BASENAME, playableDifficulties } from '@/song';
 import { Transport, Metronome } from '@/audio';
-import { h, button, field, toast, clear, downloadBlob, pickFile, fmtTime, modal } from './dom';
+import { h, button, field, toast, clear, downloadBlob, pickFile, fmtTime, modal, loadingModal } from './dom';
 import { topbar } from './topbar';
 import { studioState, type StudioTab } from './studioState';
 import { VOICE_COLORS } from '@/game/renderer';
@@ -104,8 +104,9 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
   async function newFromAudio(): Promise<void> {
     const [file] = await pickFile('audio/*,.mp3,.wav,.flac,.aac,.m4a,.ogg');
     if (!file) return;
-    await app.boot();
+    const loading = loadingModal(`Decoding ${file.name}…`);
     try {
+      await app.boot();
       const buf = await app.engine.decode(await file.arrayBuffer());
       const name = file.name.replace(/\.[^.]+$/, '');
       const ext = (file.name.split('.').pop() ?? 'mp3').toLowerCase();
@@ -114,12 +115,16 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       await openPackage(pkg, buf, null, null);
     } catch (err) {
       toast(`Could not decode audio: ${(err as Error).message}`, 'bad');
+    } finally {
+      loading.close();
     }
   }
 
   async function openExisting(e: SongListEntry): Promise<void> {
-    await app.boot();
+    // Loading + decoding a song takes a moment: say so, or the click looks ignored.
+    const loading = loadingModal(`Loading ${e.meta.title}…`);
     try {
+      await app.boot();
       const loaded = await app.library.load(e);
       const audioBlob = loaded.files.get(loaded.meta.audio);
       if (!audioBlob) return toast('Song has no audio', 'bad');
@@ -139,6 +144,8 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
       await openPackage(pkg, buf, drums, e.meta.id);
     } catch (err) {
       toast(`Could not open song: ${(err as Error).message}`, 'bad');
+    } finally {
+      loading.close();
     }
   }
 

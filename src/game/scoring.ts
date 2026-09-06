@@ -320,6 +320,12 @@ export function starsForRatio(ratio: number, accuracy: number): number {
   return 0;
 }
 
+/** One-word verdict for a finished take (results screen and the video's closing card). */
+export function verdictFor(summary: Pick<ScoreSummary, 'fullCombo' | 'stars'>): string {
+  if (summary.fullCombo) return 'FULL COMBO!';
+  return summary.stars >= 5 ? 'FLAWLESS' : summary.stars >= 4 ? 'KILLER' : summary.stars >= 3 ? 'SOLID' : summary.stars >= 2 ? 'ROUGH' : 'WIPEOUT';
+}
+
 export function starString(stars: number): string {
   const full = Math.floor(stars);
   const half = stars - full >= 0.5;

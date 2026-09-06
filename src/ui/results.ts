@@ -3,7 +3,7 @@ import type { Difficulty, HighScore, HitWindows, ScoreSummary, SongPackage } fro
 import { h, button, fmtScore, pct, downloadBlob } from './dom';
 import { fileExtensionFor, type RecordedVideo } from '@/game/videoRecorder';
 import { topbar } from './topbar';
-import { hitWindowsFor, starString } from '@/game/scoring';
+import { hitWindowsFor, starString, verdictFor } from '@/game/scoring';
 import { drawTimingHeatmap, timingSummary, type TimingHit } from '@/game/timingHeatmap';
 
 export function resultsScreen(app: App, params?: Record<string, unknown>): Screen {
@@ -45,22 +45,38 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
       ),
     );
   }
-  const video = params?.video as RecordedVideo | undefined;
+  // Performance video. It arrives either finished or as a promise (the recorder is still adding the
+  // closing results card): show a placeholder until it is ready. It sits at the bottom of the left column.
+  const videoParam = params?.video as RecordedVideo | Promise<RecordedVideo | undefined> | undefined;
   let videoUrl: string | null = null;
-  let videoBox: HTMLElement | null = null;
-  if (video && video.blob.size) {
+  let disposed = false;
+  const videoSlot = h('div', { class: 'video-slot' });
+  const showVideo = (video: RecordedVideo) => {
     videoUrl = URL.createObjectURL(video.blob);
     const ext = fileExtensionFor(video.mimeType);
     const safe = (t: string) => t.replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'song';
     const filename = `drumkiller-${safe(pkg.meta.title)}-${difficulty}-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')}.${ext}`;
     const mb = (video.blob.size / 1_048_576).toFixed(1);
-    videoBox = h('div', { class: 'video-box', style: { marginTop: '20px' } },
+    videoSlot.replaceChildren(h('div', { class: 'video-box', style: { marginTop: '24px' } },
       h('video', { src: videoUrl, controls: true, playsInline: true, preload: 'metadata' }),
       h('div', { class: 'btn-row', style: { marginTop: '10px' } },
         button(`SAVE VIDEO (${mb} MB)`, () => downloadBlob(video.blob, filename), 'primary'),
         h('span', { class: 'small dim' }, `${video.width}×${video.height} · ${Math.round(video.duration)}s · ${ext.toUpperCase()}${ext === 'webm' ? ' — plays in Chrome/Firefox/VLC' : ''}`),
       ),
+    ));
+  };
+  if (videoParam instanceof Promise) {
+    videoSlot.appendChild(h('div', { class: 'video-box pending', style: { marginTop: '24px' } }, h('span', { class: 'spinner' }), h('span', { class: 'dim' }, 'Finishing the video — adding the results card…')));
+    videoParam.then(
+      (v) => {
+        if (disposed) return;
+        if (v && v.blob.size) showVideo(v);
+        else videoSlot.replaceChildren();
+      },
+      () => videoSlot.replaceChildren(),
     );
+  } else if (videoParam && videoParam.blob.size) {
+    showVideo(videoParam);
   }
   const saved = mode === 'play';
   let rankInfo: { rank: number; isNewBest: boolean } | null = null;
@@ -71,7 +87,7 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
   const total = Math.max(1, summary.totalNotes);
   const bar = (label: string, n: number, color: string) => h('div', { class: 'jb' }, h('span', null, label), h('div', { class: 'bar' }, h('div', { style: { width: `${(n / total) * 100}%`, background: color } })), h('span', { style: { textAlign: 'right' } }, String(n)));
 
-  const verdict = summary.fullCombo ? 'FULL COMBO!' : summary.stars >= 5 ? 'FLAWLESS' : summary.stars >= 4 ? 'KILLER' : summary.stars >= 3 ? 'SOLID' : summary.stars >= 2 ? 'ROUGH' : 'WIPEOUT';
+  const verdict = verdictFor(summary);
 
   const el = h(
     'div',
@@ -106,13 +122,13 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
           ),
           heatBox,
           timingBox,
-          videoBox,
           h('div', { class: 'btn-row', style: { marginTop: '24px' } },
             button('PLAY AGAIN', () => app.navigate('game', { pkg, difficulty, mode, back: params?.back }), 'primary'),
             params?.back === 'studio' ? button('BACK TO STUDIO', () => app.navigate('studio')) : null,
             button('SONG LIST', () => app.navigate(mode === 'practice' ? 'songs-practice' : 'songs')),
             button('TITLE', () => app.navigate('title'), 'ghost'),
           ),
+          videoSlot,
         ),
         h(
           'div',
@@ -129,6 +145,7 @@ export function resultsScreen(app: App, params?: Record<string, unknown>): Scree
   return {
     el,
     dispose: () => {
+      disposed = true;
       heatObserver?.disconnect();
       if (videoUrl) URL.revokeObjectURL(videoUrl);
     },

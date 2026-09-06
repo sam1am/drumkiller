@@ -4,8 +4,8 @@ import { DIFFICULTIES, DRUM_VOICES } from '@/types';
 import { chartFromMidi, deriveDifficulty, parseMidi, constantTempoMap, DEFAULT_PPQ } from '@/midi';
 import { getChartBlob } from '@/song';
 import { GameSession, type GameMode } from '@/game/session';
-import { CAM_ASPECT, VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot } from '@/game/videoRecorder';
-import { starString } from '@/game/scoring';
+import { CAM_ASPECT, VideoRecorder, openCamera, videoRecordingSupported, type HudSnapshot, type RecordedVideo } from '@/game/videoRecorder';
+import { hitWindowsFor, starString, verdictFor } from '@/game/scoring';
 import { h, button, toast, fmtScore, clear } from './dom';
 import type { TimingHit } from '@/game/timingHeatmap';
 
@@ -386,22 +386,26 @@ export async function gameScreen(app: App, params?: Record<string, unknown>): Pr
     else app.navigate(mode === 'practice' ? 'songs-practice' : 'songs');
   }
 
-  async function finish(summary: ScoreSummary): Promise<void> {
-    let video: unknown = undefined;
+  function finish(summary: ScoreSummary): void {
+    // Every judged hit with its signed timing error, for the results screen's heatmap (and the video's card).
+    const hits: TimingHit[] = [];
+    for (const n of session?.judge.notes ?? []) if (n.state === 'hit' && n.delta !== undefined && n.judgement) hits.push({ voice: n.voice, delta: n.delta, judgement: n.judgement });
+    const windows = session?.judge.windows ?? hitWindowsFor(difficulty, settings.hitWindowScale);
+    // The recording keeps going for a few seconds showing the results card; the results screen shows
+    // the video as soon as it is ready rather than making the player wait for it.
+    let video: Promise<RecordedVideo | undefined> | undefined;
     if (recorder) {
       const rec = recorder;
       recorder = null;
-      try {
-        video = await rec.stop();
-      } catch (e) {
-        console.error(e);
-        toast('Video recording failed', 'bad');
-      }
+      video = rec
+        .finish({ title: pkg.meta.title, artist: pkg.meta.artist, difficulty, mode: mode === 'practice' ? 'practice' : 'play', verdict: verdictFor(summary), summary, hits, windows, laneOrder: settings.laneOrder })
+        .catch((e: unknown) => {
+          console.error(e);
+          toast('Video recording failed', 'bad');
+          return undefined;
+        });
     }
-    // Every judged hit with its signed timing error, for the results screen's heatmap.
-    const hits: TimingHit[] = [];
-    for (const n of session?.judge.notes ?? []) if (n.state === 'hit' && n.delta !== undefined && n.judgement) hits.push({ voice: n.voice, delta: n.delta, judgement: n.judgement });
-    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), hits, windows: session?.judge.windows, video, back: params?.back });
+    app.navigate('results', { pkg, difficulty, mode, summary, rate, timing: session?.judge.timingStats(), hits, windows, video, back: params?.back });
   }
 
   const onKey = (e: KeyboardEvent) => {

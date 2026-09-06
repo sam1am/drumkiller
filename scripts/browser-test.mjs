@@ -116,8 +116,11 @@ try {
   await sleep(4000);
   await shot('04-recording.png');
   await evaluate(`window.dkSession.finishNow()`);
-  await sleep(2500);
+  await sleep(1500);
   assert((await evaluate(`location.hash`)) === '#results', 'take finished → results screen');
+  assert(await evaluate(`!!document.querySelector('.video-box.pending')`), 'results screen shows the video is being finished (closing card)');
+  // the recorder keeps going for the 5 s results card, then the video replaces the placeholder
+  for (let i = 0; i < 60 && !(await evaluate(`!!document.querySelector('.video-box video')`)); i++) await sleep(250);
   const vid = await evaluate(`(async () => {
     const v = document.querySelector('.video-box video'); if (!v) return null;
     const r = await fetch(v.src); const blob = await r.blob();
@@ -127,11 +130,25 @@ try {
     await new Promise((res) => { probe.onseeked = res; setTimeout(res, 3000); });
     const c = document.createElement('canvas'); c.width = probe.videoWidth; c.height = probe.videoHeight;
     c.getContext('2d').drawImage(probe, 0, 0);
-    return { size: blob.size, type: blob.type, w: probe.videoWidth, h: probe.videoHeight, png: c.toDataURL('image/png').split(',')[1] };
+    const png = c.toDataURL('image/png').split(',')[1];
+    // MediaRecorder WebMs report an infinite duration until seeked to the end; then grab a frame from the closing card
+    probe.currentTime = 1e6;
+    await new Promise((res) => { probe.onseeked = res; setTimeout(res, 3000); });
+    const dur = probe.duration;
+    let card = null;
+    if (isFinite(dur) && dur > 2) {
+      probe.currentTime = dur - 1.5;
+      await new Promise((res) => { probe.onseeked = res; setTimeout(res, 3000); });
+      c.getContext('2d').drawImage(probe, 0, 0);
+      card = c.toDataURL('image/png').split(',')[1];
+    }
+    return { size: blob.size, type: blob.type, w: probe.videoWidth, h: probe.videoHeight, dur, png, card };
   })()`);
   assert(vid && vid.size > 50_000, `results screen offers a recording (${vid ? (vid.size / 1024).toFixed(0) + ' KB ' + vid.type : 'none'})`);
   assert(vid.w === 1280 && vid.h === 720, `recording is 1280×720 (got ${vid.w}×${vid.h})`);
   fs.writeFileSync(path.join(outDir, '05-recording-frame.png'), Buffer.from(vid.png, 'base64'));
+  assert(!isFinite(vid.dur) || vid.dur >= 5, `recording includes the 5 s closing card (duration ${isFinite(vid.dur) ? vid.dur.toFixed(1) + ' s' : 'unknown'})`);
+  if (vid.card) fs.writeFileSync(path.join(outDir, '05b-recording-card.png'), Buffer.from(vid.card, 'base64'));
   await shot('06-results-video.png');
   await evaluate(`window.dk.settingsStore.update({ recordVideo: false })`);
 

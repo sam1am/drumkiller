@@ -13,6 +13,11 @@
  * No server, no ffmpeg: the finished Blob is offered for download on the results screen.
  */
 
+import type { HitWindows, Lane, ScoreSummary } from '@/types';
+import { JUDGE_COLORS } from './renderer';
+import { starString } from './scoring';
+import { drawTimingHeatmap, type TimingHit } from './timingHeatmap';
+
 /** Width of the camera column as a fraction of the video width. */
 export const CAM_FRACTION = 0.3;
 /** Aspect ratio (w/h) of the camera column — the HUD preview uses the same crop. */
@@ -54,6 +59,23 @@ export interface VideoRecorderOptions {
   fps?: number;
   accent?: string;
   hud: () => HudSnapshot;
+}
+
+/** How long the closing results card stays on screen at the end of the recording. */
+export const OUTRO_MS = 5000;
+
+/** Everything the closing card shows: the results screen, condensed into one still. */
+export interface OutroCard {
+  title: string;
+  artist: string;
+  difficulty: string;
+  mode: 'play' | 'practice';
+  verdict: string;
+  summary: ScoreSummary;
+  /** Judged hits for the timing heatmap. */
+  hits: readonly TimingHit[];
+  windows: HitWindows;
+  laneOrder: readonly Lane[];
 }
 
 export interface RecordedVideo {
@@ -121,6 +143,9 @@ export class VideoRecorder {
   private lastFrame = 0;
   private frameInterval: number;
   private stopped: Promise<RecordedVideo> | null = null;
+  /** Set once the take is over: frames show the closing card instead of the highway + HUD. */
+  private card: OutroCard | null = null;
+  private heat: HTMLCanvasElement | null = null;
 
   constructor(private opts: VideoRecorderOptions) {
     this.height = opts.height;
@@ -184,7 +209,8 @@ export class VideoRecorder {
     ctx.fillRect(0, 0, W, H);
     this.drawHighway();
     this.drawCamera();
-    this.drawHud(now);
+    if (this.card) this.drawCard(this.card);
+    else this.drawHud(now);
   }
 
   /** The game area: everything right of the camera column. */
@@ -362,15 +388,56 @@ export class VideoRecorder {
     ctx.shadowBlur = 0;
   }
 
-  /** Stop recording and resolve with the finished video. Camera tracks are released. */
-  stop(): Promise<RecordedVideo> {
+  /**
+   * The take is over: keep recording for `ms` more milliseconds showing the results card (over the
+   * frozen highway, with the camera still live for the reaction shot), then stop. Resolves with the
+   * finished video like stop().
+   */
+  finish(card: OutroCard, ms = OUTRO_MS): Promise<RecordedVideo> {
     if (this.stopped) return this.stopped;
-    const rec = this.recorder;
-    if (!rec) {
+    if (!this.recorder) {
       this.release();
       return Promise.reject(new Error('not recording'));
     }
-    this.stopped = new Promise<RecordedVideo>((resolve) => {
+    this.card = card;
+    this.heat = this.renderHeatmap(card);
+    this.frame(true);
+    this.stopped = new Promise<RecordedVideo>((resolve, reject) => {
+      const began = performance.now();
+      const timer = setInterval(() => {
+        if (!this.recorder) {
+          clearInterval(timer);
+          reject(new Error('recording discarded'));
+          return;
+        }
+        if (performance.now() - began >= ms) {
+          clearInterval(timer);
+          this.stopNow().then(resolve, reject);
+          return;
+        }
+        // The game screen (and with it the camera preview element) is gone by now; a media element
+        // removed from the document pauses itself, so nudge it back to life for the reaction shot.
+        if (this.video?.paused) this.video.play().catch(() => undefined);
+        this.frame(true);
+      }, this.frameInterval);
+    });
+    return this.stopped;
+  }
+
+  /** Stop recording and resolve with the finished video. Camera tracks are released. */
+  stop(): Promise<RecordedVideo> {
+    if (this.stopped) return this.stopped;
+    if (!this.recorder) {
+      this.release();
+      return Promise.reject(new Error('not recording'));
+    }
+    this.stopped = this.stopNow();
+    return this.stopped;
+  }
+
+  private stopNow(): Promise<RecordedVideo> {
+    const rec = this.recorder!;
+    return new Promise<RecordedVideo>((resolve) => {
       rec.onstop = () => {
         const mimeType = rec.mimeType || this.mimeType || 'video/webm';
         const blob = new Blob(this.chunks, { type: mimeType });
@@ -383,7 +450,138 @@ export class VideoRecorder {
       if (rec.state !== 'inactive') rec.stop();
       else rec.onstop?.(new Event('stop'));
     });
-    return this.stopped;
+  }
+
+  /** The card's heatmap, rendered once at 720p-relative size (text stays proportionate at 1080p). */
+  private renderHeatmap(card: OutroCard): HTMLCanvasElement | null {
+    const u = this.height / 720;
+    const r = this.gameRect();
+    const c = document.createElement('canvas');
+    try {
+      drawTimingHeatmap(c, { hits: card.hits, windows: card.windows, laneOrder: card.laneOrder }, { width: (r.w - 56 * u) / u, height: (r.h - 396 * u) / u, dpr: u * 1.5 });
+    } catch (e) {
+      console.warn('heatmap render failed', e);
+      return null;
+    }
+    return c;
+  }
+
+  /** The closing card: song, verdict, score, stars, stats, judgement bars and the timing heatmap. */
+  private drawCard(c: OutroCard): void {
+    const { ctx, height: H } = this;
+    const r = this.gameRect();
+    const u = H / 720;
+    const display = (px: number) => `${px * u}px "Bungee", "Impact", "Arial Black", sans-serif`;
+    const body = (px: number, weight = 700) => `${weight} ${px * u}px "Space Grotesk", system-ui, sans-serif`;
+    const mono = (px: number) => `700 ${px * u}px "JetBrains Mono", monospace`;
+    const accent = this.opts.accent ?? '#ff2d75';
+    const s = c.summary;
+
+    // dim the frozen highway so it is a backdrop, not the subject
+    ctx.fillStyle = 'rgba(8,8,12,0.88)';
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+
+    const pad = 28 * u;
+    const left = r.x + pad;
+    const right = r.x + r.w - pad;
+    const cw = right - left;
+    const cx = r.x + r.w / 2;
+    ctx.save();
+    ctx.textBaseline = 'top';
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 8 * u;
+
+    // song
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f4f0ff';
+    ctx.font = display(22);
+    ctx.fillText(c.title, cx, 20 * u, cw);
+    ctx.fillStyle = '#a99fc0';
+    ctx.font = body(12, 500);
+    ctx.fillText(`${c.artist} · ${c.difficulty.toUpperCase()}${c.mode === 'practice' ? ' · PRACTICE' : ''}`, cx, 50 * u, cw);
+
+    // verdict, score, stars
+    ctx.fillStyle = accent;
+    ctx.font = display(16);
+    ctx.fillText(c.verdict, cx, 76 * u, cw);
+    ctx.fillStyle = '#f4f0ff';
+    ctx.font = display(56);
+    ctx.fillText(s.score.toLocaleString('en-US'), cx, 98 * u, cw);
+    ctx.fillStyle = '#ffe600';
+    ctx.shadowColor = '#ffe600';
+    ctx.shadowBlur = 18 * u;
+    ctx.font = body(24);
+    ctx.fillText(starString(s.stars).split('').join(' '), cx, 162 * u);
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 8 * u;
+
+    // accuracy / max combo / notes hit
+    const stats: [string, string][] = [
+      [`${(s.accuracy * 100).toFixed(1)}%`, 'ACCURACY'],
+      [String(s.maxCombo), 'MAX COMBO'],
+      [`${s.totalNotes - s.hits.miss}/${s.totalNotes}`, 'NOTES HIT'],
+    ];
+    stats.forEach(([v, k], i) => {
+      const x = left + (cw * (i + 0.5)) / 3;
+      ctx.fillStyle = '#f4f0ff';
+      ctx.font = display(26);
+      ctx.fillText(v, x, 202 * u);
+      ctx.fillStyle = '#a99fc0';
+      ctx.font = body(10);
+      ctx.fillText(k, x, 236 * u);
+    });
+
+    // judgement bars
+    const total = Math.max(1, s.totalNotes);
+    const rows: [string, number, string][] = [
+      ['PERFECT', s.hits.perfect, JUDGE_COLORS.perfect],
+      ['GREAT', s.hits.great, JUDGE_COLORS.great],
+      ['GOOD', s.hits.good, JUDGE_COLORS.good],
+      ['MISS', s.hits.miss, JUDGE_COLORS.miss],
+    ];
+    const barX = left + 84 * u;
+    const barW = cw - 84 * u - 56 * u;
+    rows.forEach(([label, n, color], i) => {
+      const y = 262 * u + i * 22 * u;
+      ctx.shadowBlur = 8 * u;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#a99fc0';
+      ctx.font = mono(11);
+      ctx.fillText(label, left, y + 1 * u);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#f4f0ff';
+      ctx.fillText(String(n), right, y + 1 * u);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      pill(ctx, barX, y + 3 * u, barW, 10 * u);
+      ctx.fill();
+      if (n > 0) {
+        ctx.fillStyle = color;
+        pill(ctx, barX, y + 3 * u, Math.max(10 * u, (barW * n) / total), 10 * u);
+        ctx.fill();
+      }
+    });
+
+    // timing heatmap
+    if (this.heat) {
+      const hy = 372 * u;
+      const hh = r.h - hy - 24 * u;
+      ctx.shadowBlur = 0;
+      ctx.save();
+      pill(ctx, left, hy, cw, hh, 10 * u);
+      ctx.clip();
+      ctx.drawImage(this.heat, left, hy, cw, hh);
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+      ctx.lineWidth = 1;
+      pill(ctx, left, hy, cw, hh, 10 * u);
+      ctx.stroke();
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.font = body(9, 500);
+      ctx.fillText('TIMING · EARLY ▲ / LATE ▼', left + 2 * u, hy - 13 * u);
+    }
+    ctx.restore();
   }
 
   /** Abandon the recording (quit / restart): stop everything and drop the data. */
@@ -415,4 +613,15 @@ export class VideoRecorder {
       this.video.remove();
     }
   }
+}
+
+function pill(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r = h / 2): void {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rr);
+  ctx.arcTo(x + w, y + h, x, y + h, rr);
+  ctx.arcTo(x, y + h, x, y, rr);
+  ctx.arcTo(x, y, x + w, y, rr);
+  ctx.closePath();
 }

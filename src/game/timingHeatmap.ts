@@ -136,13 +136,21 @@ const BOTTOM = 38;
 const LEFT = 58;
 const RIGHT = 12;
 
-/** Draw the heatmap onto `canvas` at its current CSS size. Safe to call again on resize. */
-export function drawTimingHeatmap(canvas: HTMLCanvasElement, opts: HeatmapOptions): void {
+/** Explicit size for an offscreen render (the video's closing card); defaults to the canvas' CSS size. */
+export interface HeatmapSize {
+  width: number;
+  height: number;
+  /** Device pixels per CSS pixel; text and line widths are in CSS pixels. */
+  dpr?: number;
+}
+
+/** Draw the heatmap onto `canvas` at its current CSS size (or `size`). Safe to call again on resize. */
+export function drawTimingHeatmap(canvas: HTMLCanvasElement, opts: HeatmapOptions, size?: HeatmapSize): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
-  const dpr = Math.min(2, devicePixelRatio || 1);
-  const W = Math.max(1, Math.floor(canvas.clientWidth));
-  const H = Math.max(1, Math.floor(canvas.clientHeight));
+  const dpr = size?.dpr ?? Math.min(2, devicePixelRatio || 1);
+  const W = Math.max(1, Math.floor(size?.width ?? canvas.clientWidth));
+  const H = Math.max(1, Math.floor(size?.height ?? canvas.clientHeight));
   canvas.width = W * dpr;
   canvas.height = H * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);

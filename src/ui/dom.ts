@@ -73,6 +73,13 @@ export function modal(content: HTMLElement, opts: { closeOnBackdrop?: boolean } 
   return { close };
 }
 
+/** A blocking "Loading…" modal for work that takes a moment (no backdrop close). */
+export function loadingModal(message = 'Loading…'): { close: () => void; set: (message: string) => void } {
+  const text = h('div', { class: 'loading-text' }, message);
+  const m = modal(h('div', { class: 'loading-modal' }, h('span', { class: 'spinner' }), text), { closeOnBackdrop: false });
+  return { close: m.close, set: (msg) => { text.textContent = msg; } };
+}
+
 export function fmtTime(sec: number): string {
   if (!isFinite(sec)) return '0:00';
   const s = Math.max(0, Math.floor(sec));
