@@ -108,6 +108,8 @@ kbd {
 }
 
 /* ───────────── buttons ───────────── */
+[hidden] { display: none !important; }
+
 .btn {
   appearance: none; border: 1px solid var(--line); background: var(--bg-3); color: var(--ink);
   font-family: var(--font-body); font-weight: 700; font-size: 14px; letter-spacing: .04em;

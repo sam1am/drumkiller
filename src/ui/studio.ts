@@ -1,7 +1,7 @@
 import type { App, Screen } from '@/app';
 import { DIFFICULTIES, DRUM_VOICES, VOICE_LABELS, type Chart, type Difficulty, type DrumVoice, type QuantizeOptions, type SongListEntry, type SongPackage } from '@/types';
 import { chartToMidi, writeMidi, performanceToChart, quantizePerformance, QUANTIZE_GRIDS, constantTempoMap, DEFAULT_PPQ, chartStats, difficultyRating, deriveDifficulty } from '@/midi';
-import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS } from '@/song';
+import { createSongPackage, exportSongZip, slugify, fileExtension, SAMPLE_EXTENSIONS, AUDIO_EXTENSIONS } from '@/song';
 import { Transport, ChartPlayer, Metronome } from '@/audio';
 import { h, button, field, toast, clear, downloadBlob, pickFile, select, fmtTime, modal } from './dom';
 import { topbar } from './topbar';
@@ -136,6 +136,42 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
     } catch (err) {
       toast(`Could not open song: ${(err as Error).message}`, 'bad');
     }
+  }
+
+  /**
+   * Swap the song's audio for another file, keeping the charts, offset and everything else. For working
+   * against a mix WITH drums while programming and shipping the drum-less mix at the end — the two files
+   * must start at the same instant for the offset to carry over.
+   */
+  async function replaceAudio(): Promise<void> {
+    const pkg = studioState.pkg;
+    if (!pkg) return;
+    const [file] = await pickFile('audio/*,.mp3,.wav,.flac,.aac,.m4a,.ogg');
+    if (!file) return;
+    const ext = fileExtension(file.name) || 'mp3';
+    if (!(AUDIO_EXTENSIONS as readonly string[]).includes(ext)) return toast(`Unsupported audio type .${ext} (use ${AUDIO_EXTENSIONS.join(', ')})`, 'bad');
+    await app.boot();
+    let buf: AudioBuffer;
+    try {
+      buf = await app.engine.decode(await file.arrayBuffer());
+    } catch (err) {
+      return toast(`Could not decode audio: ${(err as Error).message}`, 'bad');
+    }
+    stopPreview();
+    closeEditor();
+    const old = studioState.audioBuffer!;
+    pkg.files.delete(pkg.meta.audio);
+    pkg.meta.audio = `audio.${ext}`;
+    pkg.files.set(pkg.meta.audio, file);
+    pkg.meta.length = buf.duration;
+    studioState.audioBuffer = buf;
+    markDirty();
+    const diff = buf.duration - old.duration;
+    const note = Math.abs(diff) > 0.05
+      ? `${Math.abs(diff).toFixed(2)}s ${diff > 0 ? 'longer' : 'shorter'} than the old one — check the offset still lines up`
+      : 'same length as before; charts and offset carried over';
+    toast(`Audio replaced with ${file.name} (${fmtTime(buf.duration)}) — ${note}`, 'ok', 5000);
+    render();
   }
 
   function close(): void {
@@ -392,6 +428,8 @@ export function studioScreen(app: App, params?: Record<string, unknown>): Screen
           samplesEditor(),
           h('h3', null, 'Audio'),
           h('div', { class: 'small mono dim' }, `${meta.audio} · ${fmtTime(buf.duration)} · ${buf.sampleRate} Hz · ${buf.numberOfChannels} ch`),
+          h('div', { class: 'small dim', style: { margin: '6px 0 8px' } }, 'Swap the mix without touching the charts or the offset — e.g. program against a mix WITH drums, then replace it with the drum-less mix for the final version. The two files need to start at the same instant.'),
+          h('div', { class: 'btn-row' }, button('REPLACE AUDIO…', () => void replaceAudio())),
           h('h3', null, 'Share'),
           h('div', { class: 'small dim', style: { marginBottom: '8px' } }, 'The song folder holds song.json, the audio, one MIDI per difficulty (GM drum notes, channel 10) and any custom samples. Zip it to share it.'),
           h('div', { class: 'btn-row' }, button('DOWNLOAD SONG ZIP', async () => { editor?.flush(); downloadBlob(await exportSongZip(pkg), `${pkg.meta.id}.zip`); })),

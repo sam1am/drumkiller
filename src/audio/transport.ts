@@ -17,6 +17,9 @@ export const MAX_RATE = 1.5;
 export class Transport {
   private buffer: AudioBuffer | null = null;
   private source: AudioBufferSourceNode | null = null;
+  /** Per-transport level (a mute/solo for the song track); sits between the source and the song bus. */
+  private gainNode: GainNode | null = null;
+  private _gain = 1;
   private _playing = false;
   private _rate = 1;
 
@@ -60,6 +63,16 @@ export class Transport {
 
   get generation(): number {
     return this._generation;
+  }
+
+  /** Linear level of this transport's song audio (1 = as is, 0 = muted). Independent of the engine's song bus. */
+  get gain(): number {
+    return this._gain;
+  }
+
+  setGain(v: number): void {
+    this._gain = clamp(v, 0, 1);
+    if (this.gainNode) this.gainNode.gain.setTargetAtTime(this._gain, this.engine.ctx.currentTime, 0.01);
   }
 
   get segmentStart(): number {
@@ -161,7 +174,12 @@ export class Transport {
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     src.playbackRate.value = this._rate;
-    src.connect(this.engine.songBus);
+    if (!this.gainNode) {
+      this.gainNode = ctx.createGain();
+      this.gainNode.gain.value = this._gain;
+      this.gainNode.connect(this.engine.songBus);
+    }
+    src.connect(this.gainNode);
     const mySource = src;
     src.onended = () => {
       if (this.source !== mySource) return; // replaced by seek/rate change/stop

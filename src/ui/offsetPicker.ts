@@ -11,6 +11,10 @@ export interface OffsetPicker {
   setOffset(seconds: number): void;
   setBpm(bpm: number): void;
   getOffset(): number;
+  /** Seconds into the audio the playhead is at while auditioning, else null. */
+  getPlayhead(): number | null;
+  /** Put the mark (beat 1 of bar 1) at the playhead while auditioning, otherwise at the centre of the zoomed view. */
+  placeMarkHere(): void;
   stop(): void;
   dispose(): void;
 }
@@ -268,8 +272,20 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     const follow = Math.abs(viewCenter - offset) < 0.0005;
     offset = clamp(v);
     if (follow) viewCenter = offset;
+    if (metro) {
+      // keep the clicks anchored to the new mark while auditioning
+      metro.setOffset(offset);
+      metro.resync();
+    }
     draw();
     if (notify) onChange(offset);
+  }
+  /** "Place beat 1 here": the playhead while playing, else wherever the zoomed view is centred. */
+  function placeMarkHere(): void {
+    const t = transport ? transport.position : viewCenter;
+    set(t);
+    if (!transport) viewCenter = offset;
+    draw();
   }
   function setBpmLocal(b: number, notify = true): void {
     bpm = Math.max(20, Math.min(300, Math.round(b * 100) / 100));
@@ -334,6 +350,8 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
 
   // ── controls ──
   const playBtn = button('▶ PLAY', () => (playing ? stop() : play()), 'primary');
+  const hereBtn = button('⌖ BEAT 1 HERE', placeMarkHere, 'icon');
+  hereBtn.title = 'Put the mark at the playhead while playing, or at the centre of the zoomed view when stopped (Enter)';
   let clickOn = true;
   const clickBtn = button('CLICK: ON', () => { clickOn = !clickOn; clickBtn.textContent = `CLICK: ${clickOn ? 'ON' : 'OFF'}`; metro?.setEnabled(clickOn); }, 'icon small');
   const nudge = (ms: number) => button(`${ms > 0 ? '+' : '−'}${Math.abs(ms)}`, () => set(offset + ms / 1000), 'icon small');
@@ -347,6 +365,7 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     zoomCanvas,
     h('div', { class: 'row', style: { marginTop: '8px', gap: '8px' } },
       playBtn,
+      hereBtn,
       clickBtn,
       h('span', { class: 'small dim' }, 'Mark:'), readout,
       nudge(-100), nudge(-10), nudge(-1), nudge(1), nudge(10), nudge(100),
@@ -365,7 +384,7 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
       h('span', { class: 'small dim' }, 'BPM:'), bpmReadout,
       bpmNudge(-1), bpmNudge(-0.1), bpmNudge(-0.01), bpmNudge(0.01), bpmNudge(0.1), bpmNudge(1),
     ),
-    h('div', { class: 'small mute', style: { marginTop: '4px' } }, 'White line = beat 1 of bar 1 (the mark). Yellow ticks = every beat at the current BPM, tall on downbeats. PLAY starts 3 s before the mark and keeps going with the waveform scrolling under the playhead; watch whether the ticks stay on the hits — if they creep, nudge the BPM until they lock in. Shift-click the overview to move the view without moving the mark. Arrow keys nudge the mark ±10 ms (shift: ±1 ms).'),
+    h('div', { class: 'small mute', style: { marginTop: '4px' } }, 'White line = beat 1 of bar 1 (the mark). Yellow ticks = every beat at the current BPM, tall on downbeats. PLAY starts 3 s before the mark and keeps going with the waveform scrolling under the playhead; watch whether the ticks stay on the hits — if they creep, nudge the BPM until they lock in. Shift-click the overview to move the view without moving the mark. BEAT 1 HERE drops the mark on the playhead (or the view centre when stopped) — the easiest way to place it is to play, listen for the first downbeat and press Enter. Arrow keys nudge the mark ±10 ms (shift: ±1 ms).'),
   );
   el.addEventListener('keydown', (e) => {
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
@@ -375,6 +394,9 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
       e.preventDefault();
       if (playing) stop();
       else void play();
+    } else if (e.code === 'Enter') {
+      e.preventDefault();
+      placeMarkHere();
     }
   });
   const ro = new ResizeObserver(() => draw());
@@ -387,6 +409,8 @@ export function offsetPicker(app: App, buffer: AudioBuffer, initialOffset: numbe
     setOffset: (v) => set(v, false),
     setBpm: (b) => setBpmLocal(b, false),
     getOffset: () => offset,
+    getPlayhead: () => (transport ? transport.position : null),
+    placeMarkHere,
     stop,
     dispose: () => {
       stop();

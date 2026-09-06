@@ -17,7 +17,12 @@ interface EditNote {
 
 let ROW_H = 34; // recomputed on resize to fill the available height
 const RULER_H = 26;
-const LABEL_W = 110;
+const LABEL_W = 156;
+/** Per-row MUTE / SOLO buttons at the right edge of the label column. */
+const MIX_BTN = 18;
+const MIX_GAP = 4;
+const MIX_X_S = LABEL_W - MIX_GAP - MIX_BTN; // solo (rightmost)
+const MIX_X_M = MIX_X_S - MIX_GAP - MIX_BTN; // mute
 const NOTE_W = 12;
 const MIN_PPS = 20;
 const MAX_PPS = 600;
@@ -90,6 +95,37 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   let follow = true;
   let padInput = true;
   let beats: BeatMark[] = [];
+  /** Per-row mix: muted rows stay silent; while any row is soloed only soloed rows play. Session-only, not saved. */
+  const muted = new Set<DrumVoice>();
+  const soloed = new Set<DrumVoice>();
+  let songAudio = true;
+  const isSilent = (voice: DrumVoice): boolean => (soloed.size ? !soloed.has(voice) : muted.has(voice));
+  const applyMix = (): void => {
+    player.muteVoices.clear();
+    for (const v of rows) if (isSilent(v)) player.muteVoices.add(v);
+    updateMixBtn();
+    draw();
+  };
+  const toggleMute = (voice: DrumVoice): void => {
+    if (muted.has(voice)) muted.delete(voice);
+    else muted.add(voice);
+    applyMix();
+  };
+  /** Click = toggle this row in the solo set; alt-click = solo only this row (or clear if it was the only one). */
+  const toggleSolo = (voice: DrumVoice, exclusive = false): void => {
+    if (exclusive) {
+      const only = soloed.size === 1 && soloed.has(voice);
+      soloed.clear();
+      if (!only) soloed.add(voice);
+    } else if (soloed.has(voice)) soloed.delete(voice);
+    else soloed.add(voice);
+    applyMix();
+  };
+  const clearMix = (): void => {
+    muted.clear();
+    soloed.clear();
+    applyMix();
+  };
   const envChannels: Float32Array[] = [];
   for (let c = 0; c < audio.numberOfChannels; c++) envChannels.push(audio.getChannelData(c));
   const env = computeEnvelope(envChannels, audio.sampleRate, 200);
@@ -323,11 +359,12 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
       const y = yOf(n.voice);
       const hgt = 8 + n.velocity * (ROW_H - 12);
       const color = VOICE_COLORS[n.voice];
+      const silent = isSilent(n.voice) ? 0.3 : 1;
       ctx.fillStyle = color;
       // full-height column marks the whole click target; the solid bar shows velocity
-      ctx.globalAlpha = 0.18;
+      ctx.globalAlpha = 0.18 * silent;
       ctx.fillRect(x - NOTE_W / 2, y + 2, NOTE_W, ROW_H - 4);
-      ctx.globalAlpha = 0.45 + n.velocity * 0.55;
+      ctx.globalAlpha = (0.45 + n.velocity * 0.55) * silent;
       ctx.fillRect(x - NOTE_W / 2, y + ROW_H - 2 - hgt, NOTE_W, hgt);
       ctx.globalAlpha = 1;
       if (selected.has(n.id)) {
@@ -389,13 +426,31 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     ctx.fillRect(0, 0, LABEL_W, H);
     rows.forEach((voice, i) => {
       const y = RULER_H + i * ROW_H;
+      const silent = isSilent(voice);
       ctx.fillStyle = VOICE_COLORS[voice];
+      ctx.globalAlpha = silent ? 0.35 : 1;
       ctx.fillRect(0, y, 4, ROW_H);
-      ctx.fillStyle = hoverRow === i ? '#fff' : 'rgba(255,255,255,0.75)';
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = silent ? 'rgba(255,255,255,0.35)' : hoverRow === i ? '#fff' : 'rgba(255,255,255,0.75)';
       ctx.font = '700 11px "Space Grotesk", sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(VOICE_LABELS[voice].toUpperCase(), 12, y + ROW_H / 2);
+      ctx.fillText(VOICE_LABELS[voice].toUpperCase(), 12, y + ROW_H / 2, MIX_X_M - 16);
+      // MUTE / SOLO buttons
+      const by = y + (ROW_H - MIX_BTN) / 2;
+      const drawBtn = (bx: number, label: string, on: boolean, onColor: string) => {
+        ctx.fillStyle = on ? onColor : 'rgba(255,255,255,0.06)';
+        ctx.fillRect(bx, by, MIX_BTN, MIX_BTN);
+        ctx.strokeStyle = on ? onColor : 'rgba(255,255,255,0.2)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx + 0.5, by + 0.5, MIX_BTN - 1, MIX_BTN - 1);
+        ctx.fillStyle = on ? '#000' : 'rgba(255,255,255,0.55)';
+        ctx.font = '700 10px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(label, bx + MIX_BTN / 2, by + MIX_BTN / 2 + 0.5);
+      };
+      drawBtn(MIX_X_M, 'M', muted.has(voice), '#ff4d4d');
+      drawBtn(MIX_X_S, 'S', soloed.has(voice), '#ffe600');
     });
     ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = 'rgba(255,255,255,0.5)';
@@ -467,9 +522,12 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
       return;
     }
     if (x < LABEL_W) {
-      // preview the voice
       const v = rowVoice(y);
-      if (v) app.kit.trigger(v, 1);
+      if (!v) return;
+      const inBtn = (bx: number) => x >= bx && x < bx + MIX_BTN && Math.abs(y - (yOf(v) + ROW_H / 2)) <= MIX_BTN / 2;
+      if (inBtn(MIX_X_M)) toggleMute(v);
+      else if (inBtn(MIX_X_S)) toggleSolo(v, e.altKey);
+      else app.kit.trigger(v, 1); // preview the voice
       return;
     }
     const hit = noteAt(x, y);
@@ -802,6 +860,12 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   const gridSel = select(QUANTIZE_GRIDS.map((g) => ({ value: g.id, label: g.id === 'off' ? 'Snap: off' : `Snap: ${g.label}` })), grid, (v) => { grid = v as QuantizeGrid; draw(); });
   const followBtn = button('FOLLOW: ON', () => { setFollow(!follow); if (follow) { pinPlayhead(chartTime()); draw(); } }, 'icon small');
   const padBtn = button('PADS ADD NOTES: ON', () => { padInput = !padInput; padBtn.textContent = `PADS ADD NOTES: ${padInput ? 'ON' : 'OFF'}`; }, 'icon small');
+  const songBtn = button('SONG: ON', () => { songAudio = !songAudio; transport.setGain(songAudio ? 1 : 0); songBtn.textContent = `SONG: ${songAudio ? 'ON' : 'OFF'}`; songBtn.classList.toggle('danger', !songAudio); }, 'icon small');
+  songBtn.title = 'Mute / unmute the song audio (hear the drums on their own)';
+  const mixBtn = button('CLEAR M/S', clearMix, 'icon small');
+  mixBtn.title = 'Clear every row MUTE / SOLO';
+  const updateMixBtn = () => { mixBtn.hidden = !muted.size && !soloed.size; };
+  updateMixBtn();
 
   const toolbar = h('div', { class: 'editor-toolbar' },
     playBtn,
@@ -819,11 +883,13 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
     button('+', () => { pps = Math.min(MAX_PPS, pps * 1.25); draw(); }, 'icon small'),
     followBtn,
     padBtn,
+    songBtn,
+    mixBtn,
   );
   const footer = h('div', { class: 'editor-footer' }, status, h('span', { class: 'spacer' }), ...(opts.actions ?? []));
   const help = h('div', { class: 'small mute editor-help' },
     'Click empty space = add note (drops the old selection) · drag a note sideways = move, up/down = velocity · shift/⌘-drag = marquee select · shift-click = add to selection · right-click or alt-click = delete · ',
-    h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing',
+    h('kbd', null, 'Space'), ' play · ', h('kbd', null, '⌫'), ' delete · ', h('kbd', null, '⌘Z'), ' undo · ', h('kbd', null, '⇧⌘Z'), ' redo · ', h('kbd', null, '⌘A'), ' all · ', h('kbd', null, '⌘D'), ' duplicate a bar later · ', h('kbd', null, '⌘C'), '/', h('kbd', null, '⌘X'), ' copy/cut · ', h('kbd', null, '⌘V'), ' paste at playhead · ', h('kbd', null, '←→'), ' nudge / seek · ', h('kbd', null, '↑↓'), ' change drum · ', h('kbd', null, '⌘+wheel'), ' zoom · wheel scroll · ruler click = seek · pads preview when stopped, insert while playing · M / S on a row = mute / solo that drum (alt-click S = solo only it) · SONG = mute the song audio',
   );
 
   const wrap = h('div', { class: 'editor-wrap' }, canvas);
@@ -846,7 +912,7 @@ export async function chartEditor(app: App, opts: ChartEditorOptions): Promise<C
   };
   tick();
   app.input.keyboard.setEnabled(false); // editor owns the keyboard
-  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; } };
+  (window as unknown as { dkEditor: unknown }).dkEditor = { get notes() { return notes; }, get difficulty() { return difficulty; }, get selected() { return selected; }, toChart, flush, transport, copySelected, pasteAtPlayhead, get clipboard() { return clipboard; }, get dirty() { return dirty; }, get rowH() { return ROW_H; }, get pps() { return pps; }, get scrollT() { return scrollT; }, get follow() { return follow; }, get muted() { return muted; }, get soloed() { return soloed; }, get muteVoices() { return player.muteVoices; }, toggleMute, toggleSolo, clearMix, get songAudio() { return songAudio; } };
 
   return {
     el,
